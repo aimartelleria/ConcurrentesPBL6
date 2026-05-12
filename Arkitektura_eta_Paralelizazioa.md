@@ -13,7 +13,7 @@ graph TD;
     end
 
     subgraph Ingestio Geruza
-        A -->|Avro Formatu (Binarioa)| B(RabbitMQ: Fanout Exchange)
+        A -->|Avro Formatu Binarioa| B(RabbitMQ: Fanout Exchange)
         B --> C[Ilaria: telemetry_java_consumer_queue]
     end
 
