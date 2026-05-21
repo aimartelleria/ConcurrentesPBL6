@@ -23,11 +23,12 @@ fi
 # ============= STEP 2: Compilar =============
 echo
 echo "[2/4] Compilando archivos Java..."
-if [ ! -d "src/cluster" ]; then
-    echo "ERROR: Directorio src/cluster no encontrado"
+if [ ! -d "server/src" ]; then
+    echo "ERROR: Proyecto no estructurado correctamente"
     exit 1
 fi
-javac src/cluster/*.java 2>/dev/null || true
+mvn clean package -DskipTests
+echo "✓ Compilación exitosa"
 echo "✓ Compilación exitosa"
 
 # ============= STEP 3: Iniciar Nodos =============
@@ -44,17 +45,17 @@ if command -v tmux &> /dev/null; then
     
     echo "   → NODE-1 (puerto 6100)"
     tmux new-window -t rmi-cluster -n node-1
-    tmux send-keys -t rmi-cluster:node-1 "cd $(pwd) && java $JAVA_OPTS -cp src cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102" Enter
+    tmux send-keys -t rmi-cluster:node-1 "cd $(pwd) && java $JAVA_OPTS -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102" Enter
     sleep 2
     
     echo "   → NODE-2 (puerto 6101)"
     tmux new-window -t rmi-cluster -n node-2
-    tmux send-keys -t rmi-cluster:node-2 "cd $(pwd) && java $JAVA_OPTS -cp src cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102" Enter
+    tmux send-keys -t rmi-cluster:node-2 "cd $(pwd) && java $JAVA_OPTS -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102" Enter
     sleep 2
     
     echo "   → NODE-3 (puerto 6102)"
     tmux new-window -t rmi-cluster -n node-3
-    tmux send-keys -t rmi-cluster:node-3 "cd $(pwd) && java $JAVA_OPTS -cp src cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102" Enter
+    tmux send-keys -t rmi-cluster:node-3 "cd $(pwd) && java $JAVA_OPTS -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102" Enter
     sleep 3
     
     # ============= STEP 4: Iniciar Cliente =============
@@ -65,7 +66,7 @@ if command -v tmux &> /dev/null; then
     CLIENT_OPTS="-Djavax.net.ssl.trustStore=server.keystore -Djavax.net.ssl.trustStorePassword=changeit"
     
     tmux new-window -t rmi-cluster -n client
-    tmux send-keys -t rmi-cluster:client "cd $(pwd) && java $CLIENT_OPTS -cp src cluster.Client localhost:6100 localhost:6101 localhost:6102" Enter
+    tmux send-keys -t rmi-cluster:client "cd $(pwd) && java $CLIENT_OPTS -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102" Enter
     
     echo
     echo "===================================================="
@@ -89,15 +90,15 @@ if command -v tmux &> /dev/null; then
 else
     # Fallback: usar background sin tmux
     echo "   → NODE-1 (puerto 6100)"
-    nohup java $JAVA_OPTS -cp src cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102 > node-1.log 2>&1 &
+    nohup java $JAVA_OPTS -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102 > node-1.log 2>&1 &
     sleep 2
     
     echo "   → NODE-2 (puerto 6101)"
-    nohup java $JAVA_OPTS -cp src cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102 > node-2.log 2>&1 &
+    nohup java $JAVA_OPTS -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102 > node-2.log 2>&1 &
     sleep 2
     
     echo "   → NODE-3 (puerto 6102)"
-    nohup java $JAVA_OPTS -cp src cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102 > node-3.log 2>&1 &
+    nohup java $JAVA_OPTS -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102 > node-3.log 2>&1 &
     sleep 3
     
     echo
@@ -106,7 +107,7 @@ else
     
     CLIENT_OPTS="-Djavax.net.ssl.trustStore=server.keystore -Djavax.net.ssl.trustStorePassword=changeit"
     
-    nohup java $CLIENT_OPTS -cp src cluster.Client localhost:6100 localhost:6101 localhost:6102 > client.log 2>&1 &
+    nohup java $CLIENT_OPTS -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102 > client.log 2>&1 &
     
     echo
     echo "===================================================="

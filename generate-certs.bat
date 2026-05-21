@@ -21,12 +21,12 @@ if %ERRORLEVEL% EQU 0 (
     echo 1. Run nodes with TLS:
     echo    java -Djavax.net.ssl.keyStore=server.keystore ^
     echo         -Djavax.net.ssl.keyStorePassword=changeit ^
-    echo         -cp src cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
+    echo         -cp server\target\server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
     echo.
     echo 2. Run client with TLS:
     echo    java -Djavax.net.ssl.trustStore=server.keystore ^
     echo         -Djavax.net.ssl.trustStorePassword=changeit ^
-    echo         -cp src cluster.Client localhost:6100 localhost:6101 localhost:6102
+    echo         -cp client\target\client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102
     echo.
 ) else (
     echo ✗ Failed to generate certificate!

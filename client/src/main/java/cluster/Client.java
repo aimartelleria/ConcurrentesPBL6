@@ -61,8 +61,8 @@ public class Client {
         throw new RuntimeException("Could not contact any seed or known member", last);
     }
 
-    /** Runs a compute() call with cross-node failover. */
-    public double compute(double input) throws Exception {
+    /** Runs a executeTask() call with cross-node failover. */
+    public <T> T executeTask(Task<T> task) throws Exception {
         if (members.isEmpty()) refresh();
 
         for (int attempt = 0; attempt < 2; attempt++) {
@@ -76,8 +76,8 @@ public class Client {
                 try {
                     Registry reg = LocateRegistry.getRegistry(e.host, e.port);
                     ComputeService stub = (ComputeService) reg.lookup(SERVICE_NAME);
-                    System.out.println("-> dispatching to " + e);
-                    return stub.compute(input);
+                    System.out.println("-> dispatching task to " + e);
+                    return stub.executeTask(task);
                 } catch (Exception ex) {
                     System.err.println("   " + e + " failed ("
                             + ex.getClass().getSimpleName() + "), trying next...");
@@ -139,6 +139,10 @@ public class Client {
         // RabbitMQ connection (act as consumer, simulating the ingest layer)
         ConnectionFactory factory = new ConnectionFactory();
         factory.setHost("localhost");
+        
+        // ¡MAGIA! Configuramos RabbitMQ para que use Virtual Threads para procesar cada mensaje:
+        factory.setSharedExecutor(java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor());
+
         Connection conn = factory.newConnection();
         Channel channel = conn.createChannel();
 

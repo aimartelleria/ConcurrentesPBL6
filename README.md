@@ -1,5 +1,9 @@
 # Java RMI Cluster (no single point of failure)
 
+> [!TIP]
+> **🚀 ¡DOCUMENTACIÓN CENTRALIZADA DISPONIBLE!**
+> Hemos unificado todas las guías, diagramas de arquitectura, referencias rápidas y resultados en un panel web interactivo premium. Abre el archivo **[index.html](index.html)** en tu navegador para ver la documentación interactiva con buscador, modo oscuro/claro y copia rápida de comandos.
+
 A peer-to-peer RMI cluster. Every node runs its own RMI registry, members
 discover and track each other via gossip, and clients bootstrap from a
 list of seeds (any one alive is enough). Killing any subset short of
@@ -8,11 +12,12 @@ list of seeds (any one alive is enough). Killing any subset short of
 ## Files
 
 ```
-src/cluster/
+ 
   Endpoint.java         Serializable (host, port, nodeId); equality by host:port
-  ComputeService.java   Remote interface: getNodeId, ping, compute, gossip
-  ClusterNode.java      Self-registering, gossip-driven peer
-  Client.java           Multi-seed bootstrap + round-robin + failover
+  Task.java             Generic computing task interface for compute engine
+  ComputeService.java   Remote interface: getNodeId, ping, executeTask, processTelemetry, gossip
+  ClusterNode.java      Self-registering, gossip-driven peer (Virtual Threads)
+  Client.java           Multi-seed bootstrap + round-robin + failover + RabbitMQ consumer
 ```
 
 ## Design
@@ -66,7 +71,7 @@ not "this-specific-one", so list 3+ stable hosts and you're done.
 ## Build and run
 
 ```
-javac -d build src/cluster/*.java
+mvn clean install
 ```
 
 Three peer nodes, each pointing at the other two:
@@ -103,8 +108,7 @@ needed. Restart a node and it rejoins on first gossip; you'll see
   ideally a DNS A-record / SRV record returning multiple hosts) in your
   client config. The seed list is the only "I have to know something"
   step; everything after is discovered.
-- **Wire encryption.** Add `SslRMI{Client,Server}SocketFactory` to
-  `UnicastRemoteObject` if traffic crosses untrusted networks.
+- **Wire encryption is supported.** We use JVM SSL properties (e.g. `-Djavax.net.ssl.trustStore`) for encryption across untrusted networks. Ver `RUN_WITH_TLS.md`.
 
 ## Known limits
 
@@ -114,11 +118,9 @@ needed. Restart a node and it rejoins on first gossip; you'll see
   usually fine; on a flaky network you'd want to add it.
 - **Split-brain is silent.** If the cluster partitions, each side keeps
   serving on the assumption the other side is dead. For a stateless
-  service like this one, that's the right behaviour. For anything that
+  service like a Compute Engine, that's the right behaviour. For anything that
   mutates state, you need a consensus protocol (Raft, Paxos) on top.
-- **`compute()` is stateless.** Replace it with whatever real work you
-  do — the membership mechanics don't care, but if your work has state,
-  you also need a shared store.
+- **`processTelemetry` relies on RabbitMQ.** Ensure RabbitMQ is configured properly.
 - **O(N²) gossip.** Every node pings every other peer every round.
   Fine up to dozens of nodes; beyond that, sample a random K peers per
   round instead.

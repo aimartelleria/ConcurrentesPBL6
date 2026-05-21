@@ -19,7 +19,7 @@ public interface ComputeService extends Remote {
     long ping() throws RemoteException;
 
     /** Example unit of work performed by the cluster. */
-    double compute(double input) throws RemoteException;
+    <T> T executeTask(Task<T> t) throws RemoteException;
 
     /** Procesa la telemetría enviada en formato Avro y realiza el pipeline ETL */
     void processTelemetry(byte[] avroPayload) throws RemoteException;

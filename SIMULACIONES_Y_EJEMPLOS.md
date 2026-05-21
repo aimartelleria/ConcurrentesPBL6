@@ -4,7 +4,7 @@
 
 ### Terminal 1: Arrancar NODE-1
 ```bash
-$ java cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
+$ java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
 ```
 
 **Output esperado:**
@@ -20,7 +20,7 @@ $ java cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 l
 
 ### Terminal 2: Arrancar NODE-2 (3 segundos después)
 ```bash
-$ java cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
+$ java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
 ```
 
 **Output esperado:**
@@ -40,13 +40,13 @@ Gossip response: {node-1@localhost:6100, node-2@localhost:6101}
 
 ### Terminal 3: Arrancar NODE-3
 ```bash
-$ java cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
+$ java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
 ```
 
 ### Terminal 4: Ejecutar Cliente
 
 ```bash
-$ java cluster.Client localhost:6100 localhost:6101 localhost:6102
+$ java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102
 ```
 
 **Output esperado:**
@@ -55,20 +55,20 @@ Refreshed cluster view via localhost:6100:
   [node-1@localhost:6100, node-2@localhost:6101, node-3@localhost:6102]
 
 -> dispatching to node-1
-   [node-1] compute(0.000)
-   result = 0.000
+   [node-1] processTelemetry(payload)
+   ✓ Procesado (ETL)
 
 -> dispatching to node-2
-   [node-2] compute(1.500)
-   result = 2.449
+   [node-2] processTelemetry(payload)
+   ✓ Procesado (ETL)
 
 -> dispatching to node-3
-   [node-3] compute(3.000)
-   result = 3.464
+   [node-3] processTelemetry(payload)
+   ✓ Procesado (ETL)
 
 -> dispatching to node-1
-   [node-1] compute(4.500)
-   result = 4.243
+   [node-1] processTelemetry(payload)
+   ✓ Procesado (ETL)
 
 ...
 (repite 12 veces con round-robin)
@@ -81,32 +81,32 @@ Refreshed cluster view via localhost:6100:
 ### Antes de caer:
 ```
 CLIENT:
--> dispatching to node-1: compute(0)   ✓ result = 0.0
--> dispatching to node-2: compute(1.5) ✓ result = 2.449
--> dispatching to node-3: compute(3)   ✓ result = 3.464
--> dispatching to node-1: compute(4.5) ✓ result = 4.243
+-> dispatching to node-1: processTelemetry(payload)   ✓ ✓ Procesado (ETL)
+-> dispatching to node-2: processTelemetry(payload) ✓ ✓ Procesado (ETL)
+-> dispatching to node-3: processTelemetry(payload)   ✓ ✓ Procesado (ETL)
+-> dispatching to node-1: processTelemetry(payload) ✓ ✓ Procesado (ETL)
 ```
 
 ### Ejecutamos en Terminal 4: `Ctrl+C` en NODE-2
 ```bash
 # Terminamos NODE-2
-$ java cluster.ClusterNode node-2 localhost 6101 ... 
+$ java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 ... 
 ^C
 (se detiene abruptamente)
 ```
 
 ### Output del Cliente (mientras continúa):
 ```bash
--> dispatching to node-2: compute(6)
+-> dispatching to node-2: processTelemetry(payload)
    node-2@localhost:6101 failed (ConnectException), trying next...
 
--> dispatching to node-3: compute(6)
-   [node-3] compute(6.000)
-   ✓ result = 4.899
+-> dispatching to node-3: processTelemetry(payload)
+   [node-3] processTelemetry(payload)
+   ✓ ✓ Procesado (ETL)
 
--> dispatching to node-1: compute(7.5)
-   [node-1] compute(7.5)
-   ✓ result = 5.477
+-> dispatching to node-1: processTelemetry(payload)
+   [node-1] processTelemetry(payload)
+   ✓ ✓ Procesado (ETL)
 ```
 
 **Análisis:**
@@ -139,7 +139,7 @@ Cluster state:
 
 ### Reiniciamos NODE-2:
 ```bash
-$ java cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
+$ java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
 [node-2] Registered ComputeNode on port 6101
 [node-2] Attempting to join...
 ```
@@ -182,13 +182,13 @@ sudo iptables -A OUTPUT -p tcp --dport 6100:6102 -j DROP
 
 ### Output del Cliente:
 ```
--> dispatching to node-1: compute(x)
+-> dispatching to node-1: processTelemetry(payload)
    node-1@localhost:6100 failed (SocketTimeoutException), trying next...
 
--> dispatching to node-2: compute(x)
+-> dispatching to node-2: processTelemetry(payload)
    node-2@localhost:6101 failed (SocketTimeoutException), trying next...
 
--> dispatching to node-3: compute(x)
+-> dispatching to node-3: processTelemetry(payload)
    node-3@localhost:6102 failed (SocketTimeoutException), trying next...
 
 all cached members failed, refreshing view
@@ -226,20 +226,20 @@ t=15s:  Cae NODE-3
 
 ### Output del Cliente:
 ```
-[t=0s]  -> dispatching to node-1: compute(0) ✓
-[t=5s]  -> dispatching to node-1: compute(1) 
+[t=0s]  -> dispatching to node-1: processTelemetry(payload) ✓
+[t=5s]  -> dispatching to node-1: processTelemetry(payload) 
          node-1 failed, trying next...
-         -> dispatching to node-2: compute(1) ✓
+         -> dispatching to node-2: processTelemetry(payload) ✓
 
-[t=10s] -> dispatching to node-2: compute(2)
+[t=10s] -> dispatching to node-2: processTelemetry(payload)
          node-2 failed, trying next...
-         -> dispatching to node-3: compute(2) ✓
+         -> dispatching to node-3: processTelemetry(payload) ✓
 
-[t=15s] -> dispatching to node-1: compute(3)
+[t=15s] -> dispatching to node-1: processTelemetry(payload)
          node-1 failed, trying next...
-         -> dispatching to node-2: compute(3)
+         -> dispatching to node-2: processTelemetry(payload)
          node-2 failed, trying next...
-         -> dispatching to node-3: compute(3)
+         -> dispatching to node-3: processTelemetry(payload)
          node-3 failed, trying next...
          
 ❌ ALL MEMBERS FAILED EVEN AFTER A REFRESH
@@ -297,11 +297,11 @@ members = {
 
 ## 7️⃣ Traza de Código: Paso a Paso
 
-### Escenario: `client.compute(1.5)` cuando NODE-2 está caído
+### Escenario: `client.processTelemetry(payload)` cuando NODE-2 está caído
 
 ```java
 // CLIENT SIDE
-client.compute(1.5)
+client.processTelemetry(payload)
   ↓
   if (members.isEmpty()) refresh();  // NO vacío
   ↓
@@ -320,7 +320,7 @@ client.compute(1.5)
       try {
         Registry reg = LocateRegistry.getRegistry("localhost", 6102);
         ComputeService stub = (ComputeService) reg.lookup("ComputeNode");
-        return stub.compute(1.5);  // ← ÉXITO!
+        return stub.processTelemetry(payload);  // ← ÉXITO!
       } catch (Exception ex) {
         // siguiente...
       }
@@ -377,7 +377,7 @@ NODE-1 receives response:
 
 ### Latency promedio (localhost):
 - **RMI lookup**: ~0.5ms
-- **compute() call**: ~1-2ms
+- **processTelemetry() call**: ~1-2ms
 - **Gossip round**: ~5-10ms
 
 ### Detección de fallos:
@@ -399,7 +399,7 @@ CLIENT:     start
             |
 NODE-1: ____| (arranca 5s después)
 
-CLIENT.compute(x):
+CLIENT.processTelemetry(payload):
   refresh() → Intenta seeds: todos FAIL
   Exception: "Could not contact any seed or known member"
   
@@ -416,7 +416,7 @@ seeds = {
   "localhost:6101",       // ← actual
 }
 
-CLIENT.compute(x):
+CLIENT.processTelemetry(payload):
   refresh():
     Intenta dead-host:6100... timeout ✗
     Intenta localhost:6101... OK ✓
@@ -426,8 +426,8 @@ CLIENT.compute(x):
 
 ### Case 3: RMI Registry collision (mismo puerto)
 ```
-java cluster.ClusterNode node-1 localhost 6100 ...
-java cluster.ClusterNode node-2 localhost 6100 ...  // ← MISMO PUERTO!
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 ...
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6100 ...  // ← MISMO PUERTO!
 
 [node-2] Registered ComputeNode on port 6100
 Exception: java.rmi.server.ExportException: 
@@ -527,7 +527,7 @@ netstat -an | grep 610
 breakpoint → Log members state aquí
 breakpoint → Log failures count aquí
 
-// En Client.compute()
+// En Client.processTelemetry()
 breakpoint → Log refresh() aquí
 breakpoint → Log failover loop aquí
 ```

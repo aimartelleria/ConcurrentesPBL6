@@ -36,7 +36,7 @@ Files created:
 
 ```bash
 cd c:\Users\aimar\Downloads\files
-javac src/cluster/*.java
+mvn clean install
 ```
 
 ---
@@ -49,7 +49,7 @@ cd c:\Users\aimar\Downloads\files
 
 java -Djavax.net.ssl.keyStore=server.keystore ^
      -Djavax.net.ssl.keyStorePassword=changeit ^
-     -cp src cluster.ClusterNode node-1 localhost 6100 ^
+     -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 ^
      localhost:6100 localhost:6101 localhost:6102
 ```
 
@@ -59,7 +59,7 @@ cd c:\Users\aimar\Downloads\files
 
 java -Djavax.net.ssl.keyStore=server.keystore ^
      -Djavax.net.ssl.keyStorePassword=changeit ^
-     -cp src cluster.ClusterNode node-2 localhost 6101 ^
+     -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 ^
      localhost:6100 localhost:6101 localhost:6102
 ```
 
@@ -69,7 +69,7 @@ cd c:\Users\aimar\Downloads\files
 
 java -Djavax.net.ssl.keyStore=server.keystore ^
      -Djavax.net.ssl.keyStorePassword=changeit ^
-     -cp src cluster.ClusterNode node-3 localhost 6102 ^
+     -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 ^
      localhost:6100 localhost:6101 localhost:6102
 ```
 
@@ -91,7 +91,7 @@ cd c:\Users\aimar\Downloads\files
 
 java -Djavax.net.ssl.trustStore=server.keystore ^
      -Djavax.net.ssl.trustStorePassword=changeit ^
-     -cp src cluster.Client localhost:6100 localhost:6101 localhost:6102
+     -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102
 ```
 
 **Output esperado:**
@@ -100,11 +100,11 @@ Refreshed cluster view via localhost:6100:
   [node-1@localhost:6100, node-2@localhost:6101, node-3@localhost:6102]
 
 -> dispatching to node-1
-   [node-1] compute(0.000)
+   [node-1] processTelemetry(payload)
    result = 0.000
 
 -> dispatching to node-2
-   [node-2] compute(1.500)
+   [node-2] processTelemetry(payload)
    result = 2.449
 
 ...
@@ -159,29 +159,29 @@ if not exist "server.keystore" (
 
 echo.
 echo Compilando...
-javac src\cluster\*.java 2>nul
+mvn clean install
 
 echo.
 echo Iniciando NODE-1 en Terminal nueva...
-start cmd /k "java -Djavax.net.ssl.keyStore=server.keystore -Djavax.net.ssl.keyStorePassword=changeit -cp src cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102"
+start cmd /k "java -Djavax.net.ssl.keyStore=server.keystore -Djavax.net.ssl.keyStorePassword=changeit -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102"
 
 timeout /t 2
 
 echo.
 echo Iniciando NODE-2 en Terminal nueva...
-start cmd /k "java -Djavax.net.ssl.keyStore=server.keystore -Djavax.net.ssl.keyStorePassword=changeit -cp src cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102"
+start cmd /k "java -Djavax.net.ssl.keyStore=server.keystore -Djavax.net.ssl.keyStorePassword=changeit -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102"
 
 timeout /t 2
 
 echo.
 echo Iniciando NODE-3 en Terminal nueva...
-start cmd /k "java -Djavax.net.ssl.keyStore=server.keystore -Djavax.net.ssl.keyStorePassword=changeit -cp src cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102"
+start cmd /k "java -Djavax.net.ssl.keyStore=server.keystore -Djavax.net.ssl.keyStorePassword=changeit -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102"
 
 timeout /t 3
 
 echo.
 echo Iniciando CLIENT en Terminal nueva...
-start cmd /k "java -Djavax.net.ssl.trustStore=server.keystore -Djavax.net.ssl.trustStorePassword=changeit -cp src cluster.Client localhost:6100 localhost:6101 localhost:6102"
+start cmd /k "java -Djavax.net.ssl.trustStore=server.keystore -Djavax.net.ssl.trustStorePassword=changeit -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102"
 
 echo.
 echo ✓ Todos los procesos iniciados!
@@ -203,7 +203,7 @@ Ejecuta un nodo con debug:
 java -Djavax.net.debug=ssl:handshake ^
      -Djavax.net.ssl.keyStore=server.keystore ^
      -Djavax.net.ssl.keyStorePassword=changeit ^
-     -cp src cluster.ClusterNode node-1 localhost 6100 localhost:6100
+     -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100
 ```
 
 **Output (parcial):**
@@ -316,7 +316,7 @@ El certificado que generas es **auto-firmado**:
 
 | Aspecto | Sin TLS | Con TLS |
 |---------|---------|---------|
-| **Comando** | `java cluster.Client localhost:6100` | `java -Djavax.net.ssl.trustStore=... cluster.Client localhost:6100` |
+| **Comando** | `java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100` | `java -Djavax.net.ssl.trustStore=... cluster.Client localhost:6100` |
 | **Seguridad** | 🔴 Tráfico en claro | 🟢 Encriptado |
 | **Performance** | 🟢 Rápido | 🟡 ~5-10% más lento |
 | **Setup** | 🟢 Trivial | 🟡 Requiere certificados |
@@ -333,22 +333,22 @@ generate-certs.bat
 # 2. Ejecutar NODE-1 CON TLS
 java -Djavax.net.ssl.keyStore=server.keystore ^
      -Djavax.net.ssl.keyStorePassword=changeit ^
-     -cp src cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
+     -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
 
 # 3. Ejecutar NODE-2 CON TLS
 java -Djavax.net.ssl.keyStore=server.keystore ^
      -Djavax.net.ssl.keyStorePassword=changeit ^
-     -cp src cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
+     -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
 
 # 4. Ejecutar NODE-3 CON TLS
 java -Djavax.net.ssl.keyStore=server.keystore ^
      -Djavax.net.ssl.keyStorePassword=changeit ^
-     -cp src cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
+     -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
 
 # 5. Ejecutar CLIENT CON TLS
 java -Djavax.net.ssl.trustStore=server.keystore ^
      -Djavax.net.ssl.trustStorePassword=changeit ^
-     -cp src cluster.Client localhost:6100 localhost:6101 localhost:6102
+     -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102
 ```
 
 ---

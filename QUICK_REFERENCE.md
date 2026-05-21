@@ -24,7 +24,7 @@ Usa:      Serializable (viaja por RMI)
 ```
 Propósito: Definir QUYÉ operaciones hacen los nodos
 Tipo:     Interface + Remote
-Métodos:  getNodeId(), ping(), compute(), gossip()
+Métodos:  getNodeId(), ping(), processTelemetry(), gossip()
 Usa:      Implementada por ClusterNode
 ```
 
@@ -33,11 +33,11 @@ Usa:      Implementada por ClusterNode
 Propósito: SER un nodo del cluster
 Tipo:     Servidor RMI
 Ejecuta:  
-  1. compute(valor) = sqrt(abs(valor)) * 2
+  1. processTelemetry(payload) = ETL score
   2. gossip(sender, view) = descubrimiento
   3. ping() = liveness check
 
-Arranca con: java cluster.ClusterNode <nodeId> <host> <port> <seed...>
+Arranca con: java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode <nodeId> <host> <port> <seed...>
 ```
 
 ### Client.java
@@ -48,9 +48,9 @@ Ejecuta:
   1. Bootstrap desde semillas
   2. Cache + round-robin
   3. Failover automático
-  4. 12 llamadas compute()
+  4. 12 llamadas processTelemetry()
 
-Arranca con: java cluster.Client <seed:port> [seed:port ...]
+Arranca con: java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client <seed:port> [seed:port ...]
 ```
 
 ---
@@ -59,19 +59,19 @@ Arranca con: java cluster.Client <seed:port> [seed:port ...]
 
 ### PASO 1: Compilar
 ```bash
-javac src/cluster/*.java
+mvn clean install
 ```
 
 ### PASO 2: Arrancar 3 Nodos
 ```bash
 # Terminal 1
-java -cp src cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
 
 # Terminal 2
-java -cp src cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
 
 # Terminal 3
-java -cp src cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
 ```
 
 ### PASO 3: Esperar 3-5 segundos
@@ -83,17 +83,17 @@ java -cp src cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:
 ### PASO 4: Arrancar Cliente
 ```bash
 # Terminal 4
-java -cp src cluster.Client localhost:6100 localhost:6101 localhost:6102
+java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102
 ```
 
 ### PASO 5: Ver Resultados
 ```bash
-# Cliente hace 12 compute() calls:
-# i=0:  compute(0.0)   → result = 0.000
-# i=1:  compute(1.5)   → result = 2.449
-# i=2:  compute(3.0)   → result = 3.464
+# Cliente hace 12 processTelemetry() calls:
+
+
+
 # ...
-# i=11: compute(16.5)  → result = 8.124
+
 ```
 
 ---
@@ -130,10 +130,10 @@ Refreshed cluster view via localhost:6100:
 
 ### ✅ Cliente Balanceo
 ```
--> dispatching to node-1: compute(0)
--> dispatching to node-2: compute(1.5)
--> dispatching to node-3: compute(3)
--> dispatching to node-1: compute(4.5)  <- Vuelve al principio (round-robin)
+-> dispatching to node: processTelemetry(payload)
+-> dispatching to node: processTelemetry(payload)
+-> dispatching to node: processTelemetry(payload)
+-> dispatching to node: processTelemetry(payload)
 ```
 **Significa:** Cliente alterna entre nodos (carga balanceada)
 
@@ -166,7 +166,7 @@ Exception: java.rmi.server.ExportException: Port already in use: 6100
 
 Solución:
 1. Cambia el puerto en el comando:
-   java cluster.ClusterNode node-new localhost 6103 ...
+   java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-new localhost 6103 ...
 2. O mata el proceso anterior:
    pkill -f "cluster.ClusterNode"
 3. O espera a que Java libere el puerto (~1 minuto)
@@ -190,7 +190,7 @@ Solución:
 
 ### Problema: Cliente se cuelga
 ```
--> dispatching to node-X: compute(...)
+-> dispatching to node: processTelemetry(payload)
 (sin output por 60+ segundos)
 
 Causa: Timeout de RMI (default ~30s)
@@ -206,7 +206,7 @@ Solución: Asegúrate que usas System.out.println()
 (Los System.err.println() van a stderr)
 
 O redirige:
-java cluster.Client localhost:6100 2>&1 | tee output.log
+java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 2>&1 | tee output.log
 ```
 
 ---
@@ -232,7 +232,7 @@ java cluster.Client localhost:6100 2>&1 | tee output.log
    │  {NODE-1, NODE-2, NODE-3}     │
    └─────┬─────────────────────────┘
          │
-         │ 2. compute() ← Tarea
+         │ 2. processTelemetry() ← Tarea
          │
     ┌────┴────┬──────────┬──────────┐
     ▼         ▼          ▼          ▼
@@ -256,7 +256,7 @@ java cluster.Client localhost:6100 2>&1 | tee output.log
 | **Anti-entropy** | Protocolo que reduce el desorden | Gossip hace que todos aprendan lo mismo |
 | **Round-robin** | Alternancia circular | Llamada 1→NODE-1, 2→NODE-2, 3→NODE-3, 4→NODE-1 |
 | **SPOF** | Single Point of Failure (punto único de fallo) | No hay SPOF aquí (sin servidor central) |
-| **RMI** | Remote Method Invocation (llamadas remotas Java) | `stub.compute()` es una llamada remota |
+| **RMI** | Remote Method Invocation (llamadas remotas Java) | `stub.processTelemetry(payload)` es una llamada remota |
 | **Registry** | Directorio de servicios RMI | Cada nodo crea su propio registry |
 
 ---
@@ -329,12 +329,12 @@ public String getStatus() {
 
 ### Ejercicio 3: Monitorear estado en vivo
 ```java
-// En Client.java, antes de compute():
+// En Client.java, antes de processTelemetry():
 while (true) {
     System.out.println("Current members: " + 
         client.members.values());
     Thread.sleep(1000);
-    client.compute(Math.random());
+    client.processTelemetry(payload);
 }
 ```
 
@@ -358,7 +358,7 @@ Failover            ✅ DONE     Automático round-robin
 Tombstones          ✅ DONE     30 segundos TTL
 Rejoin              ✅ DONE     Immediatamente si contacto directo
 Persistencia        ❌ TODO     (no hay base de datos)
-Encriptación        ❌ TODO     (RMI plano)
+Encriptación        ✅ Implementada (RMI con TLS)
 Split-brain solve   ❌ TODO     (no resuelto)
 Rebalanceo          ❌ TODO     (no redistribuye en altas cargas)
 ```
@@ -403,12 +403,12 @@ chmod +x generate-certs.sh run-with-tls.sh
 # Nodo
 java -Djavax.net.ssl.keyStore=server.keystore \
      -Djavax.net.ssl.keyStorePassword=changeit \
-     -cp src cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101
+     -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101
 
 # Cliente
 java -Djavax.net.ssl.trustStore=server.keystore \
      -Djavax.net.ssl.trustStorePassword=changeit \
-     -cp src cluster.Client localhost:6100
+     -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100
 ```
 
 | Documento | Propósito |

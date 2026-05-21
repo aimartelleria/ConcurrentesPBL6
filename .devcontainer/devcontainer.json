@@ -1,0 +1,31 @@
+{
+  "name": "Java 25 RMI Cluster",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/java:1": {
+      "version": "25",
+      "jdkDistro": "open",
+      "installMaven": "true",
+      "mavenVersion": "latest"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "java.configuration.updateBuildConfiguration": "automatic",
+        "java.compile.nullAnalysis.mode": "automatic"
+      },
+      "extensions": [
+        "vscjava.vscode-java-pack"
+      ]
+    }
+  },
+  "forwardPorts": [
+    6100,
+    6101,
+    6102,
+    5672,
+    15672
+  ],
+  "postCreateCommand": "mvn clean compile"
+}

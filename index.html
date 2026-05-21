@@ -1,0 +1,1614 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebHardMon - Panel de Documentación</title>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Prism.js for Code Highlighting -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" id="prism-theme">
+    
+    <!-- Vanilla CSS Premium Styling -->
+    <style>
+        :root {
+            /* Dark Theme Colors (Default) */
+            --bg-main: #0b0f19;
+            --bg-sidebar: #0f172a;
+            --bg-card: #1e293b;
+            --bg-code: #0b0f19;
+            --border-color: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent: #3b82f6;
+            --accent-gradient: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+            --accent-hover: #60a5fa;
+            --pulse-color: #22c55e;
+            --highlight: #f59e0b;
+            
+            --font-main: 'Outfit', sans-serif;
+            --font-code: 'Fira Code', monospace;
+            --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            --transition-speed: 0.3s;
+        }
+
+        [data-theme="light"] {
+            /* Light Theme Colors */
+            --bg-main: #f8fafc;
+            --bg-sidebar: #f1f5f9;
+            --bg-card: #ffffff;
+            --bg-code: #f1f5f9;
+            --border-color: #e2e8f0;
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #94a3b8;
+            --accent: #2563eb;
+            --accent-gradient: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+            --accent-hover: #1d4ed8;
+            --pulse-color: #16a34a;
+            --highlight: #eab308;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-main);
+            background-color: var(--bg-main);
+            color: var(--text-primary);
+            display: flex;
+            min-height: 100vh;
+            overflow-x: hidden;
+            transition: background-color var(--transition-speed), color var(--transition-speed);
+        }
+
+        /* Scrollbar styles */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: var(--bg-main);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+
+        /* Sidebar Styles */
+        .sidebar {
+            width: 290px;
+            background-color: var(--bg-sidebar);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            position: fixed;
+            left: 0;
+            top: 0;
+            z-index: 100;
+            transition: transform var(--transition-speed), background-color var(--transition-speed), border-color var(--transition-speed);
+        }
+
+        .sidebar-brand {
+            padding: 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .sidebar-brand i {
+            font-size: 24px;
+            background: var(--accent-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .sidebar-brand h1 {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+
+        .sidebar-menu {
+            list-style: none;
+            padding: 20px 12px;
+            flex-grow: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .menu-item button {
+            width: 100%;
+            padding: 12px 16px;
+            border: none;
+            background: none;
+            color: var(--text-secondary);
+            font-family: var(--font-main);
+            font-size: 14px;
+            font-weight: 500;
+            text-align: left;
+            border-radius: 8px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transition: all 0.2s ease;
+        }
+
+        .menu-item button:hover {
+            color: var(--text-primary);
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+
+        [data-theme="light"] .menu-item button:hover {
+            background-color: rgba(0, 0, 0, 0.03);
+        }
+
+        .menu-item.active button {
+            color: #ffffff;
+            background: var(--accent-gradient);
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.25);
+        }
+
+        .sidebar-footer {
+            padding: 20px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        /* Main Workspace Styles */
+        .workspace {
+            margin-left: 290px;
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            width: calc(100% - 290px);
+            transition: margin var(--transition-speed), width var(--transition-speed);
+        }
+
+        /* Top Navigation Header */
+        .top-nav {
+            height: 70px;
+            background-color: var(--bg-card);
+            border-bottom: 1px solid var(--border-color);
+            padding: 0 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 90;
+            transition: background-color var(--transition-speed), border-color var(--transition-speed);
+        }
+
+        .hamburger {
+            display: none;
+            background: none;
+            border: none;
+            color: var(--text-primary);
+            font-size: 20px;
+            cursor: pointer;
+        }
+
+        .status-container {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .status-pill {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background-color: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        [data-theme="light"] .status-pill {
+            background-color: rgba(0, 0, 0, 0.02);
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--pulse-color);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--pulse-color);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.9); opacity: 0.7; }
+            50% { transform: scale(1.1); opacity: 1; box-shadow: 0 0 12px var(--pulse-color); }
+            100% { transform: scale(0.9); opacity: 0.7; }
+        }
+
+        .search-wrapper {
+            position: relative;
+            width: 320px;
+        }
+
+        .search-wrapper i {
+            position: absolute;
+            left: 14px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-muted);
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 10px 16px 10px 40px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background-color: var(--bg-main);
+            color: var(--text-primary);
+            font-family: var(--font-main);
+            font-size: 14px;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        .search-input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+        }
+
+        .nav-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .theme-toggle-btn {
+            background: none;
+            border: 1px solid var(--border-color);
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
+            color: var(--text-secondary);
+            font-size: 16px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+
+        .theme-toggle-btn:hover {
+            color: var(--text-primary);
+            border-color: var(--text-secondary);
+            background-color: rgba(255, 255, 255, 0.03);
+        }
+
+        /* Content Container */
+        .content-container {
+            flex-grow: 1;
+            padding: 40px;
+            max-width: 1100px;
+            width: 100%;
+            margin: 0 auto;
+        }
+
+        /* Document Viewer Details (Markdown rendered styles) */
+        .markdown-body {
+            font-size: 16px;
+            line-height: 1.7;
+        }
+
+        .markdown-body h1, 
+        .markdown-body h2, 
+        .markdown-body h3, 
+        .markdown-body h4 {
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-top: 32px;
+            margin-bottom: 16px;
+            letter-spacing: -0.3px;
+        }
+
+        .markdown-body h1 {
+            font-size: 36px;
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 12px;
+            margin-top: 0;
+            background: var(--accent-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: inline-block;
+        }
+
+        .markdown-body h2 {
+            font-size: 24px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 8px;
+        }
+
+        .markdown-body h3 {
+            font-size: 19px;
+        }
+
+        .markdown-body p {
+            margin-bottom: 16px;
+            color: var(--text-secondary);
+        }
+
+        .markdown-body a {
+            color: var(--accent);
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.2s ease;
+        }
+
+        .markdown-body a:hover {
+            text-decoration: underline;
+            color: var(--accent-hover);
+        }
+
+        .markdown-body ul, 
+        .markdown-body ol {
+            margin-bottom: 16px;
+            padding-left: 24px;
+            color: var(--text-secondary);
+        }
+
+        .markdown-body li {
+            margin-bottom: 6px;
+        }
+
+        .markdown-body code {
+            font-family: var(--font-code);
+            font-size: 14px;
+            background-color: var(--bg-code);
+            padding: 3px 6px;
+            border-radius: 4px;
+            color: #f43f5e;
+        }
+
+        [data-theme="light"] .markdown-body code {
+            color: #d0173e;
+        }
+
+        .markdown-body pre {
+            background-color: var(--bg-code) !important;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+            overflow-x: auto;
+            position: relative;
+        }
+
+        .markdown-body pre code {
+            background: none;
+            padding: 0;
+            border-radius: 0;
+            color: inherit;
+            display: block;
+            line-height: 1.5;
+        }
+
+        /* Table Design */
+        .markdown-body table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 24px;
+            font-size: 14px;
+            background-color: var(--bg-card);
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+        }
+
+        .markdown-body th {
+            background-color: rgba(255, 255, 255, 0.02);
+            font-weight: 600;
+            text-align: left;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        [data-theme="light"] .markdown-body th {
+            background-color: rgba(0, 0, 0, 0.01);
+        }
+
+        .markdown-body td {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-secondary);
+        }
+
+        .markdown-body tr:last-child td {
+            border-bottom: none;
+        }
+
+        .markdown-body tr:hover td {
+            background-color: rgba(255, 255, 255, 0.01);
+        }
+
+        [data-theme="light"] .markdown-body tr:hover td {
+            background-color: rgba(0, 0, 0, 0.005);
+        }
+
+        .markdown-body blockquote {
+            border-left: 4px solid var(--accent);
+            padding: 8px 16px;
+            margin-bottom: 24px;
+            background-color: rgba(59, 130, 246, 0.05);
+            border-radius: 0 8px 8px 0;
+        }
+
+        .markdown-body blockquote p {
+            margin-bottom: 0;
+            font-style: italic;
+        }
+
+        /* Alert Callouts styles matching GitHub format */
+        .alert-callout {
+            border-left: 4px solid var(--accent);
+            padding: 16px;
+            margin-bottom: 24px;
+            border-radius: 0 8px 8px 0;
+            display: flex;
+            gap: 12px;
+        }
+
+        .alert-callout i {
+            font-size: 16px;
+            margin-top: 4px;
+        }
+
+        .alert-callout-content {
+            flex-grow: 1;
+        }
+
+        .alert-callout-title {
+            font-weight: 600;
+            margin-bottom: 4px;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+
+        .alert-note {
+            background-color: rgba(59, 130, 246, 0.06);
+            border-color: #3b82f6;
+            color: #93c5fd;
+        }
+        [data-theme="light"] .alert-note {
+            color: #1e3a8a;
+        }
+
+        .alert-tip {
+            background-color: rgba(34, 197, 94, 0.06);
+            border-color: #22c55e;
+            color: #86efac;
+        }
+        [data-theme="light"] .alert-tip {
+            color: #14532d;
+        }
+
+        .alert-important {
+            background-color: rgba(139, 92, 246, 0.06);
+            border-color: #8b5cf6;
+            color: #c084fc;
+        }
+        [data-theme="light"] .alert-important {
+            color: #4c1d95;
+        }
+
+        .alert-warning {
+            background-color: rgba(245, 158, 11, 0.06);
+            border-color: #f59e0b;
+            color: #fde047;
+        }
+        [data-theme="light"] .alert-warning {
+            color: #713f12;
+        }
+
+        .alert-caution {
+            background-color: rgba(239, 68, 68, 0.06);
+            border-color: #ef4444;
+            color: #fca5a5;
+        }
+        [data-theme="light"] .alert-caution {
+            color: #7f1d1d;
+        }
+
+        /* Code Copy Button */
+        .copy-btn {
+            position: absolute;
+            right: 8px;
+            top: 8px;
+            background-color: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            border-radius: 4px;
+            padding: 6px 10px;
+            font-size: 12px;
+            cursor: pointer;
+            opacity: 0;
+            transition: all 0.2s ease;
+        }
+
+        .markdown-body pre:hover .copy-btn {
+            opacity: 1;
+        }
+
+        .copy-btn:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+            color: var(--text-primary);
+        }
+
+        .copy-btn.copied {
+            background-color: var(--pulse-color);
+            color: white;
+            border-color: var(--pulse-color);
+        }
+
+        /* Highlight matching search */
+        .search-highlight {
+            background-color: var(--highlight);
+            color: #000000;
+            border-radius: 2px;
+            padding: 0 2px;
+        }
+
+        /* Mermaid Diagram Styling */
+        .mermaid {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 24px;
+            display: flex;
+            justify-content: center;
+        }
+
+        /* Responsive Breakpoints */
+        @media (max-width: 1024px) {
+            .sidebar {
+                transform: translateX(-100%);
+            }
+            .sidebar.open {
+                transform: translateX(0);
+            }
+            .workspace {
+                margin-left: 0;
+                width: 100%;
+            }
+            .hamburger {
+                display: block;
+            }
+            .search-wrapper {
+                width: 220px;
+            }
+            .status-container {
+                display: none;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .content-container {
+                padding: 20px;
+            }
+            .search-wrapper {
+                display: none;
+            }
+            .top-nav {
+                padding: 0 16px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Left Navigation Sidebar -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-brand">
+            <i class="fa-solid fa-network-wired"></i>
+            <div>
+                <h1>WebHardMon</h1>
+                <div style="font-size: 11px; color: var(--text-muted);">Clúster RMI & Telemetría</div>
+            </div>
+        </div>
+        
+        <ul class="sidebar-menu">
+            <li class="menu-item active" data-doc="readme">
+                <button><i class="fa-solid fa-home"></i> Inicio del Clúster</button>
+            </li>
+            <li class="menu-item" data-doc="resultados">
+                <button><i class="fa-solid fa-chart-line"></i> Guía y Resultados</button>
+            </li>
+            <li class="menu-item" data-doc="arquitectura">
+                <button><i class="fa-solid fa-diagram-project"></i> Arquitectura</button>
+            </li>
+            <li class="menu-item" data-doc="completa">
+                <button><i class="fa-solid fa-book"></i> Memoria Completa</button>
+            </li>
+            <li class="menu-item" data-doc="reference">
+                <button><i class="fa-solid fa-list-check"></i> Cheatsheet</button>
+            </li>
+            <li class="menu-item" data-doc="tls">
+                <button><i class="fa-solid fa-shield-halved"></i> Seguridad TLS</button>
+            </li>
+            <li class="menu-item" data-doc="simulaciones">
+                <button><i class="fa-solid fa-terminal"></i> Simulaciones</button>
+            </li>
+        </ul>
+        
+        <div class="sidebar-footer">
+            <div style="font-size: 12px; color: var(--text-muted);">
+                v2.1.0-RC
+            </div>
+            <a href="https://github.com/betxe/WebHardMon" target="_blank" style="color: var(--text-secondary);"><i class="fa-brands fa-github"></i></a>
+        </div>
+    </aside>
+
+    <!-- Main Workspace -->
+    <main class="workspace">
+        <!-- Top Nav Bar -->
+        <header class="top-nav">
+            <button class="hamburger" id="hamburger"><i class="fa-solid fa-bars"></i></button>
+            
+            <div class="status-container">
+                <div class="status-pill">
+                    <div class="pulse-dot"></div>
+                    RMI Cluster: ACTIVO
+                </div>
+                <div class="status-pill">
+                    <i class="fa-solid fa-envelope" style="color: var(--accent);"></i>
+                    RabbitMQ: AMQP
+                </div>
+            </div>
+
+            <div class="search-wrapper">
+                <i class="fa-solid fa-magnifying-glass"></i>
+                <input type="text" class="search-input" id="search-input" placeholder="Buscar en este documento...">
+            </div>
+
+            <div class="nav-actions">
+                <button class="theme-toggle-btn" id="theme-toggle" title="Cambiar tema">
+                    <i class="fa-solid fa-moon"></i>
+                </button>
+            </div>
+        </header>
+
+        <!-- Dynamic Content Area -->
+        <div class="content-container">
+            <article class="markdown-body" id="rendered-content">
+                <!-- Renders dynamically -->
+            </article>
+        </div>
+    </main>
+
+    <!-- Embedded Markdown Contents inside script blocks -->
+    <script type="text/markdown" id="doc-readme">
+# Java RMI Cluster (P2P & Telemetría)
+
+Un clúster peer-to-peer dinámico programado en Java RMI. Cada nodo ejecuta su propio RMI registry independiente, descubriéndose y monitorizándose entre sí mediante un protocolo asíncrono descentralizado de **Gossip**. 
+
+La arquitectura está diseñada para eliminar cualquier Punto Único de Fallo (SPOF). La caída de cualquier nodo o cliente no detiene el procesamiento general del sistema.
+
+## Componentes del Workspace
+
+El sistema se compone de los siguientes subsistemas:
+
+1. **`AgenteGo`** (en `AgenteGo-main/`): Agente recolector escrito en Go que toma métricas en tiempo real del sistema de ficheros, CPU y memoria, codificando el mensaje en **Avro** binario y empujándolo a RabbitMQ de forma no bloqueante.
+2. **`Client`** (en `client/`): Aplicación puente basada en Java 21 Virtual Threads que consume los mensajes de RabbitMQ, los guarda localmente simulando MinIO, y los despacha mediante RMI al clúster aplicando balanceo de carga Round-Robin y failover.
+3. **`ClusterNode`** (en `server/`): Nodos del clúster RMI P2P que reciben la métrica Avro, ejecutan el enriquecimiento de datos en un flujo ETL paralelo, calculan la métrica **Stress Score** y simulan el almacenamiento de los datos enriquecidos.
+4. **`Common`** (en `common/`): Interfaces RMI compartidas, la definición serializable de `Endpoint` y la abstracción del patrón `Task<T>`.
+
+## Diseño de Resiliencia
+
+* **Sin coordinador central**: No existe un líder ni base de datos compartida para saber quién está vivo. Los nodos cotillean (*gossip*) entre ellos. El cliente arranca apuntando a una lista de semillas (*seeds*); si al menos una semilla está viva, obtiene la topología del clúster dinámicamente.
+* **Tombstones**: Cuando un nodo se cae por 3 rondas (~9 segundos), el clúster lo declara muerto y crea un *tombstone* de 30 segundos, impidiendo que cotilleos obsoletos lo reintroduzcan en la lista.
+* **Limpieza de Tombstone Directo**: Si el nodo caído se reinicia en el mismo puerto, su mensaje gossip inicial limpia el tombstone de forma inmediata, permitiendo un reingreso instantáneo.
+* **Failover en Cliente**: Si un nodo muere mientras el cliente le envía datos por RMI, la llamada devuelve una excepción de red. El cliente captura el fallo, selecciona el siguiente nodo vivo en la cola circular y reintenta el despacho de forma transparente y sin pérdida de datos.
+    </script>
+
+    <script type="text/markdown" id="doc-resultados">
+# 📖 Guía de Ejecución y Resultados del Cluster
+
+Este documento explica cómo funciona el flujo de datos entre el agente de monitoreo (Go), la cola de mensajería (RabbitMQ) y la malla de procesamiento distribuido (Java RMI), y detalla cómo interpretar los resultados obtenidos en las pruebas de ejecución y failover.
+
+---
+
+## 🏗️ Flujo de Datos
+
+```text
+┌────────────────┐          ┌──────────────┐          ┌──────────────┐
+│   Agente Go    │ ──Avro──►│   RabbitMQ   │ ──AMQP──►│ Cliente Java │
+│ (Métricas CPU/ │          │   (Broker)   │          │ (RMI Bridge) │
+│  RAM/Disk/Temp)│          └──────────────┘          └──────┬───────┘
+└────────────────┘                                           │
+                                                  Balanceo / │ RMI
+                                                    Failover │
+                                                             ▼
+                                                    ┌────────────────┐
+                                                    │  Cluster Java  │
+                                                    │ (Virtual Th.)  │
+                                                    └────────────────┘
+```
+
+1. **Agente Go**: Inspecciona el sistema operativo usando `gopsutil` en intervalos regulares, genera un registro binario serializado con el esquema **Avro**, y lo publica en un exchange tipo fanout (`telemetry_fanout`) de RabbitMQ.
+2. **Cliente Java**: Está permanentemente suscrito al exchange de RabbitMQ. En cuanto recibe una métrica binaria en formato Avro, actúa como un puente ("bridge") y la despacha al cluster Java utilizando llamadas RMI.
+3. **Nodos del Cluster Java (`ClusterNode`)**:
+   - Cada nodo hospeda su propio registro RMI de forma distribuida (sin un servidor central).
+   - Utilizan un protocolo de **Gossip (chisme)** periódico en segundo plano para informarse mutuamente qué nodos están vivos o cuáles han caído (evicción).
+   - Al recibir el paquete Avro, realizan un proceso de enriquecimiento (ETL) y calculan un **Stress Score** en paralelo mediante **Virtual Threads**.
+
+---
+
+## 🛠️ Ajustes Realizados para la Integración
+
+1. **Exchange Unificado**: Se modificó `SuscriberRabbitMQ.go` para que publique datos en el exchange de tipo fanout `telemetry_fanout`, sincronizándolo con la cola que escucha el `Client.java`.
+2. **Compatibilidad de Compilación**: Se redujo el requerimiento de versión en `go.mod` (`go 1.22+`) y se ejecutó `go mod tidy` para garantizar que compile sin errores en entornos estándares.
+
+---
+
+## 🚀 Cómo iniciar el sistema en local
+
+### 1. Iniciar RabbitMQ
+Levantar el broker en Docker:
+```bash
+docker run -d --name rabbitmq-cluster -p 5672:5672 -p 15672:15672 rabbitmq:3-management
+```
+
+### 2. Arrancar los Nodos Java (Cluster)
+Compila el proyecto Java:
+```bash
+mvn clean package
+```
+Inicia tres nodos en distintas terminales usando diferentes puertos RMI:
+```bash
+# Terminal 1 (Nodo 1)
+java -cp "server/target/server-1.0-SNAPSHOT.jar" cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
+
+# Terminal 2 (Nodo 2)
+java -cp "server/target/server-1.0-SNAPSHOT.jar" cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
+
+# Terminal 3 (Nodo 3)
+java -cp "server/target/server-1.0-SNAPSHOT.jar" cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
+```
+
+### 3. Arrancar el Cliente Java (Consumidor/Puente)
+```bash
+java -cp "client/target/client-1.0-SNAPSHOT.jar" cluster.Client localhost:6100 localhost:6101 localhost:6102
+```
+
+### 4. Ejecutar el Agente Go
+```bash
+go run AgenteGo-main/SuscriberRabbitMQ.go -rabbitmq-url amqp://guest:guest@localhost:5672/
+```
+
+---
+
+## 📊 Interpretación de Resultados de Prueba
+
+### Envío de Métnales (Go)
+El Agente Go recopila las métricas de hardware del sistema:
+```text
+Iniciando servicio de recolección métricas en segundo plano...
+Se enviarán métricas a RabbitMQ cada 5 minutos.
+[2026-05-20 08:42:58] Datos recolectados normales: {Timestamp:1779266578 CPUPercent:1.182327318355726 CPUModel:12th Gen Intel(R) Core(TM) i7-12650H RAMPercent:23.011672656562755 RAMTotal:8175046656 DiskPercent:9.89245871010225 DiskTotal:1081101176832 Temp:<nil>}
+[2026-05-20 08:42:58] datos binarios enviados correctamente por RabbitMQ
+```
+* **Interpretación**: Indica que el recolector de Go accedió al hardware del host (o contenedor), serializó la información en formato Avro binario (~78 bytes debido a las cadenas y longs adicionales) y la encoló exitosamente en RabbitMQ.
+
+### Procesamiento y Enriquecimiento (Java)
+El nodo que recibe la llamada RMI ejecuta el pipeline ETL y visualiza la información formateada:
+```text
+[node-2 | Thread: ] ETL Procesado.
+  - CPU Model: 12th Gen Intel(R) Core(TM) i7-12650H (1,18%)
+  - RAM Total: 7,61 GB (23,01%)
+  - Disk Total: 1006,85 GB (9,89%)
+  - Temp: N/A
+  - Stress Score: 11,66 / 100
+```
+* **Interpretación**: 
+  - La llamada RMI funcionó correctamente y deserializó el registro Avro completo.
+  - Las capacidades de memoria y disco se convirtieron de bytes a Gigabytes (GB) de forma legible para el operador (`7,61 GB` y `1006,85 GB`).
+  - La temperatura se muestra como `N/A` porque el agente de Go se ejecuta dentro de un contenedor virtualizado (Docker Desktop en Windows) donde la interfaz térmica de Linux no está disponible.
+  - El **Stress Score** de `11,66 / 100` se calculó usando la ponderación: `(1,18% * 0.4) + (23,01% * 0.4) + (9,89% * 0.2)`. 
+
+### Comportamiento ante Caídas (Failover RMI)
+Cuando apagamos `node-2` e iniciamos otro envío desde el agente de Go, el cliente Java muestra:
+```text
+[x] Received Avro Telemetry (78 bytes)
+node-2@localhost:6101 failed (ConnectException), trying next...
+-> dispatching telemetry to node-1@localhost:6100
+```
+Y en los logs del cluster se reporta:
+```text
+Evicted (no response after 3 rounds): node-2@localhost:6101
+[node-1] view: [node-3@localhost:6102]
+```
+* **Interpretación**: 
+  - **Evicción**: Los nodos del cluster detectaron que `node-2` ya no responde a los pings de Gossip y lo eliminaron de la vista de miembros de forma descentralizada.
+  - **Failover automático**: El Cliente Java detectó la desconexión del nodo asignado en su cola Round-Robin, reintentó la petición con el siguiente nodo vivo (`node-1`) y procesó el mensaje sin pérdida de información.
+    </script>
+
+    <script type="text/markdown" id="doc-arquitectura">
+# 📊 Proyecto: Cluster RMI sin Punto Único de Fallo
+
+## 🎯 ¿Qué es este proyecto?
+
+Es un **sistema de cluster distribuido** hecho en Java RMI donde múltiples nodos pueden comunicarse entre sí de forma peer-to-peer (de igual a igual) **sin necesidad de un servidor central**. El cliente puede conectarse a cualquier nodo, y si falla uno, automáticamente se conecta a otro.
+
+Es como una red de computadoras donde cada una es independiente, pero todas se conocen entre sí y trabajan juntas.
+
+---
+
+## 🏗️ Arquitectura del Sistema
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                         CLIENTE                             │
+│  (Bootstrap → Round-Robin → Failover)                      │
+└─────────────────────────────────────────────────────────────┘
+                          ↓ ↓ ↓
+        ┌─────────────────┼─────────────────┐
+        ↓                 ↓                 ↓
+   ┌─────────┐       ┌─────────┐       ┌─────────┐
+   │  NODE 1 │◄─────►│  NODE 2 │◄─────►│  NODE 3 │
+   │ (Gossip)│       │ (Gossip)│       │ (Gossip)│
+   └─────────┘       └─────────┘       └─────────┘
+     RMI:6100         RMI:6101         RMI:6102
+```
+
+### Características clave:
+
+1. **Sin punto único de fallo**: No hay servidor central. Cada nodo es independiente.
+2. **RMI (Java Remote Method Invocation)**: Comunicación remota entre máquinas Java.
+3. **Descubrimiento automático**: Los nodos se conocen entre sí mediante gossip (chismes).
+4. **Resiliencia**: Si un nodo cae, los demás siguen funcionando.
+5. **Bootstrap desde semillas**: El cliente solo necesita saber la dirección de al menos un nodo para empezar.
+
+---
+
+## 📁 Explicación de Cada Archivo
+
+### 1. **Endpoint.java** 🗺️
+**¿Qué es?** Una clase que representa la identidad de red de un nodo.
+
+```text
+┌──────────────────┐
+│ Endpoint         │
+├──────────────────┤
+│ nodeId: String   │  <- Identificador único del nodo
+│ host: String     │  <- IP o hostname (ej: localhost)
+│ port: int        │  <- Puerto RMI (ej: 6100)
+└──────────────────┘
+```
+
+**Funciones principales:**
+- `parse("localhost:6100")`: Convierte un string en un Endpoint
+- `addr()`: Devuelve "host:port" como clave única
+- Implementa `Serializable` para poder enviarse por RMI
+
+**Analogía**: Es como el DNI de una persona, pero para un nodo del cluster.
+
+---
+
+### 2. **ComputeService.java** 📡
+**¿Qué es?** Una interfaz remota que define qué operaciones puede hacer cada nodo.
+
+```java
+Interface ComputeService (Remote)
+├── getNodeId() → String
+├── ping() → long (prueba que esté vivo)
+├── executeTask(Task<T>) → T (motor de computación genérico)
+├── processTelemetry(byte[]) → void (procesamiento ETL de Avro)
+└── gossip(sender, theirView) → Set<Endpoint> (descubrimiento)
+```
+
+**¿Por qué Remote?** Para que otros programas Java puedan llamar estos métodos a través de la red.
+
+**¿Qué hace cada método?**
+- `executeTask(Task<T>)`: Ejecuta una tarea genérica enviada por el cliente (Compute Engine).
+- `processTelemetry(byte[])`: Procesa métricas en formato Avro a través de Virtual Threads, calculando el Stress Score.
+- `gossip(...)`: Intercambia información sobre qué nodos existen (protocolo anti-entropy).
+- `ping()`: Verifica que el nodo siga vivo.
+
+---
+
+### 3. **ClusterNode.java** 🖥️
+**¿Qué es?** Un nodo del cluster. Es el "servidor" que:
+- Crea su propio registro RMI
+- Escucha en un puerto específico
+- Se comunica con otros nodos via gossip
+- Ejecuta tareas (compute)
+
+**Estructura interna:**
+
+```text
+┌────────────────────────────────────────┐
+│         ClusterNode (Nodo)             │
+├────────────────────────────────────────┤
+│ self: Endpoint                         │ ← Quién soy
+│ seeds: List<Endpoint>                  │ ← Nodos de arranque
+│ members: Map<String, Endpoint>         │ ← Nodos que conozco
+│ failures: Map<String, Int>             │ ← Fallos de cada nodo
+│ tombstones: Map<String, Long>          │ ← Nodos muertos (temp)
+├────────────────────────────────────────┤
+│ Ejecuta cada 3 segundos:               │
+│ - Intenta gossip con cada miembro      │
+│ - Cuenta fallos (max 3)                │
+│ - Evicta si fallos >= 3                │
+│ - Crea tombstone por 30 segundos       │
+└────────────────────────────────────────┘
+```
+
+**¿Qué es el Gossip?**
+Es como si los nodos chismearan entre sí:
+- "Hola, soy NODE-1 y conozco a NODE-2 y NODE-3"
+- "OK, actualicé mi lista de miembros conocidos"
+- Si no responde 3 veces → Lo marcamos como muerto (tombstone)
+- Si se reinicia → El tombstone se borra automáticamente
+
+**¿Qué es un Tombstone?**
+Una marca que dice "este nodo estaba muerto". Evita que otros nodos sigan intentando conectar a una dirección que ya no existe.
+
+---
+
+### 4. **Client.java** 👤
+**¿Qué es?** El programa que USA el clúster. Es quien pide operaciones.
+
+**Flujo de trabajo:**
+
+```text
+1. Bootstrap
+   ├─ "Dame la lista de nodos conocidos"
+   └─ Solo necesita 1 nodo respondiendo
+
+2. Cache + Round-Robin
+   ├─ Guarda lista de miembros
+   ├─ Alterna entre ellos (NODE-1 → NODE-2 → NODE-3 → NODE-1)
+   └─ Esto balancea carga
+
+3. Failover (si falla)
+   ├─ Intenta siguiente nodo
+   └─ Si todos fallan → Refresca lista y reintenta
+
+4. Ejecuta tarea
+   └─ processTelemetry(valor) en cualquier nodo disponible
+```
+
+**¿Qué simula el cliente?**
+- Un puente (consumidor) que recibe datos desde RabbitMQ y los pasa al cluster.
+- En el `main()` se conecta a RabbitMQ (usando Virtual Threads) y consume de la cola `telemetry_java_consumer_queue`.
+- Por cada mensaje Avro recibido, hace: `processTelemetry(payload)` a un nodo del cluster.
+- Simula: **Ingesta asíncrona, balanceo de carga, recuperación de fallos, y descubrimiento dinámico**.
+
+---
+
+## 🚀 Implementación del Patrón "Compute Engine"
+
+Para garantizar la extensibilidad de la malla, el clúster soporta la inyección dinámica de código a través del patrón **Compute Engine**:
+
+### Interfaz de Tarea (`Task.java`):
+Define una unidad de trabajo arbitraria que el cliente envía empaquetada.
+```java
+package cluster;
+import java.io.Serializable;
+
+public interface Task<T> extends Serializable {
+    T execute();
+}
+```
+
+### Ejecución Agnóstica en el Servidor:
+`ClusterNode` recibe la tarea y la ejecuta localmente en sus hilos sin conocer los detalles de implementación previos, devolviendo el resultado genérico al cliente:
+```java
+@Override
+public <T> T executeTask(Task<T> t) {
+    System.out.printf("[%s] executing remote task...%n", self.nodeId);
+    return t.execute();
+}
+```
+    </script>
+
+    <script type="text/markdown" id="doc-completa">
+# 📘 Memoria Técnica y Documentación Global del Proyecto
+
+Este documento proporciona una visión unificada, profunda y definitiva sobre la arquitectura, los componentes y la **justificación de las decisiones tecnológicas** del proyecto de Cluster RMI P2P y Telemetría.
+
+---
+
+## 1. 🎯 Visión General
+
+El sistema es una **red distribuida de computación *Peer-to-Peer* (P2P) y procesamiento de telemetría sin Punto Único de Fallo (SPOF)**. Su propósito es recoger datos de hardware (telemetría), encolarlos para evitar pérdida de datos en picos de carga, y distribuirlos a un enjambre de nodos de computación que se autodescubren mediante un protocolo *Gossip*. 
+
+A nivel funcional, el sistema:
+1. **Recopila** métricas en máquinas externas.
+2. **Serializa y encola** de forma altamente eficiente.
+3. **Distribuye** el trabajo o telemetría a través de una malla P2P de nodos Java.
+4. **Resiste** caídas de nodos, redireccionando el tráfico automáticamente de manera distribuida.
+
+---
+
+## 2. 🧠 Justificación Tecnológica (Stack)
+
+Cada tecnología en este ecosistema no fue elegida al azar, sino que resuelve un problema específico del procesamiento o la arquitectura en red.
+
+### 🌟 2.1. Java 21 y Virtual Threads (Project Loom)
+En la parte del procesamiento RMI (Motor de Cálculo) y el puente (Cliente), la concurrencia tradicional generaría "cuellos de botella" graves: RMI bloquea los hilos durante la conexión y espera.
+- **Justificación:** Los *Virtual Threads* permiten instanciar millones de hilos superligeros que se "aparcan" gratis cuando esperan I/O (la red), evitando que el motor se sature.
+- **Resultado:** En nuestra implementación, RabbitMQ o las peticiones RMI usan `Executors.newVirtualThreadPerTaskExecutor()`, logrando alto rendimiento sin un límite duro de *ThreadPools*.
+
+### 🌟 2.2. Java RMI (Remote Method Invocation)
+Sirve como vía de comunicación RPC (Remote Procedure Call) a nivel interno.
+- **Justificación:** Otorga la capacidad de invocar métodos remotos (como `processTelemetry` o `executeTask(Task)`) en el clúster con serialización nativa de objetos complejos Java (como clases `Task`). El *overhead* de red es compensado al no requerir parseos de JSON/HTTP continuamente.
+- **Resultado:** Las lógicas abstractas se pueden distribuir de forma nativa enviando *Bytecode*.
+
+### 🌟 2.3. Protocolo Gossip P2P
+Para tener un cluster *"master-less"* (sin un líder ni servidor centralizado).
+- **Justificación:** Un servidor central o servicio estilo ZooKeeper añade complejidad y un punto único de fallo. *Gossip* emula el comportamiento de un virus o "chisme": cada nodo le cuenta a otro a quién conoce, propagando la información de salud y topología gradualmente por la red.
+- **Resultado:** Alta tolerancia a la partición y fallos en hardware comercial estándar. O(N²) de coste pasivo pero inmensa robustez.
+
+### 🌟 2.4. RabbitMQ
+El software bróker AMQP.
+- **Justificación:** Si los agentes de Go enviasen los datos en vivo directo a los nodos, la caída de estos haría perder métricas, y un aluvión de telemetría haría colapsar la capa de red con denegación de servicio (Backpressure problems). RabbitMQ introduce **desacoplamiento** y actúa de "amortiguador" (*buffer*).
+- **Resultado:** Si el cluster RMI de Java se apaga o sufre, RabbitMQ retiene ordenadamente los mensajes hasta que vuelva.
+
+### 🌟 2.5. Golang (Agentes de Extracción)
+El `AgenteGo` se encarga de extraer la métrica e iniciar el ciclo vital de los datos.
+- **Justificación:** Go se compila como un binario estático, sin requerir una JVM de 200MB en las máquinas de donde obtiene los datos. Es altamente concurrente y consume ~15MB-30MB de memoria en ejecución. Ideal para *sidecars* y sistemas embebidos de monitorización.
+
+### 🌟 2.6. Apache Avro
+Para la codificación del mensaje de RabbitMQ a RMI.
+- **Justificación:** Frente a JSON que necesita descifrar strings, Avro comprime los datos de forma binaria apoyado en un *schema* fijo, reduciendo drásticamente (hasta en un 70%) el tamaño de banda ocupada en red y acelerando la de-serialización.
+
+### 🌟 2.7. TLS/SSL para Cifrado
+Para la comunicación en el interior del cluster.
+- **Justificación:** RMI en crudo carece de seguridad y transita en texto o bytes predecibles por la red (vulnerable a *man-in-the-middle* o ejecución de comandos remota maliciosa). Inyectando `-Djavax.net.ssl.trustStore` y fábricas de SSL personalizadas, el cluster RMI pasa a ser encriptado, pudiendo interconectar zonas geográficas diferentes con seguridad.
+
+---
+
+## 🔀 Flujo Completo y Ciclo de Vida de los Datos
+
+1. **[GO]** Un sensor en el Agente de Go detecta que la CPU local está al 90%. Empaqueta esta información.
+2. **[GO -> AVRO]** Go serializa la métrica utilizando codificación binaria *Avro* y un schema compartido.
+3. **[GO -> AMQP]** Go envía este paquete binario al Topic configurado en *RabbitMQ* (`telemetry_fanout`).
+4. **[MQ]** RabbitMQ encola el paquete y se asegura de que exista persistencia.
+5. **[JAVA CLIENT]** El nodo `Client` ("el consumidor"), escuchando mediante un hilo Virtual, recibe instantáneamente desde la cola MQ el paquete Avro.
+6. **[JAVA CLIENT -> LOAD BALANCER]** El `Client` verifica su caché Gossip. Descubre que hay 3 nodos vivos. El puntero *round-robin* selecciona el `NODO 2`.
+7. **[JAVA RMI (TLS)]** `Client` invoca `stubNODO2.processTelemetry(paquete_avro)`. El flujo viaja por red con encriptación TLS.
+8. **[JAVA NODE]** El `NODO 2` (Motor de Cálculo) recibe el Byte Array instanciando un *Virtual Thread*, deserializa el paquete y efectúa la lógica de transformación / cálculo (Stress Score) o almacenamiento final.
+    </script>
+
+    <script type="text/markdown" id="doc-reference">
+# 🚀 Quick Reference & Guía de Inicio Rápido
+
+## 📋 Tabla Comparativa: Los 4 Componentes
+
+| Clase / Fichero | Rol | Puerto | ¿RMI? | ¿Corre solo? | Responsabilidad |
+|-----------------|-----|--------|-------|--------------|-----------------|
+| **Endpoint.java** | Datos | - | ✓ (Serializable) | N/A | Identidad de red (IP:puerto) |
+| **ComputeService.java** | Interfaz | - | ✓ (Remote) | N/A | Contrato RMI para nodos |
+| **ClusterNode.java** | Servidor | 6100+ | ✓ (exports self) | ✓ SÍ | Nodo del cluster (gossip, compute) |
+| **Client.java** | Cliente | - | ✗ (consume RMI) | ✓ SÍ | Consumidor de servicios (failover) |
+
+---
+
+## 🏃 Ejecución en 5 Pasos
+
+### PASO 1: Compilar
+```bash
+mvn clean install
+```
+
+### PASO 2: Arrancar 3 Nodos
+```bash
+# Terminal 1
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
+
+# Terminal 2
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
+
+# Terminal 3
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
+```
+
+### PASO 3: Esperar 3-5 segundos
+Los nodos se conocen entre sí vía gossip. Verás en los logs: `"Refreshed cluster view..."`
+
+### PASO 4: Arrancar Cliente
+```bash
+java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102
+```
+
+### PASO 5: Ver Resultados
+El cliente consumirá telemetría de RabbitMQ y la balanceará entre los nodos dinámicamente.
+
+---
+
+## 🔍 Entender los Logs
+
+### Startup Normal (NODE-1)
+`[node-1] Registered ComputeNode on port 6100` -> Nodo arrancó, crea su RMI Registry en puerto 6100.
+
+### Bootstrap Esperando Seeds
+`Gossip with localhost:6101... failed (ConnectException)` -> Node-1 es el primero en arrancar, no encuentra otros. Es normal.
+
+### Otro Nodo Se Une
+`Refreshed cluster view via localhost:6100: [node-1@localhost:6100, node-2@localhost:6101]` -> Node-2 se conectó a Node-1 y obtuvo la lista de miembros.
+
+### Cliente Bootstrap
+`Refreshed cluster view via localhost:6100: [node-1@localhost:6100, node-2@localhost:6101, node-3@localhost:6102]` -> Cliente se conectó y cacheó todos los miembros.
+
+### Cliente Balanceo
+`-> dispatching telemetry to node-1@localhost:6100` -> Cliente alterna entre nodos de forma balanceada.
+
+### Fallo (si un nodo cae)
+`node-2@localhost:6101 failed (ConnectException), trying next...` -> Cliente intentó NODE-2, falló, probará NODE-3.
+
+### Eviction (después de 3 fallos)
+`Evicted (no response after 3 rounds): node-2@localhost:6101` -> NODE-1 dio por perdido a NODE-2, lo marcó muerto por 30s.
+
+---
+
+## 🐛 Troubleshooting
+
+### Problema: "Port already in use: 6100"
+* **Causa**: Un proceso Java previo sigue ocupando el puerto RMI.
+* **Solución**: Mata el proceso usando:
+  * En Windows: `Stop-Process -Name java -Force`
+  * En Linux: `pkill -f "ClusterNode"`
+
+### Problema: Cliente dice "Could not contact any seed"
+* **Causa**: Ningún nodo está corriendo en los puertos indicados.
+* **Solución**: Asegúrate de levantar al menos una semilla primero. Verifica el firewall y las direcciones host de red.
+    </script>
+
+    <script type="text/markdown" id="doc-tls">
+# 🔐 Ejecutar Cluster RMI con TLS/SSL
+
+Para asegurar la red RMI interna frente a ataques man-in-the-middle o inyección de tareas no autorizadas, el clúster puede configurarse para cifrar todo su tráfico por TLS/SSL de forma nativa.
+
+## 📋 Configuración Paso a Paso
+
+### Paso 1: Generar Certificados (Keystore)
+
+Ejecuta el script incluido en el proyecto para generar el keystore auto-firmado:
+* **En Windows**: `generate-certs.bat`
+* **En Linux/Mac**: `./generate-certs.sh`
+
+Este comando crea el almacén de claves `server.keystore` en el directorio de trabajo con la clave privada y el certificado público.
+
+---
+
+### Paso 2: Ejecutar Nodos CON TLS
+
+Inyecta las propiedades de red TLS de la JVM al arrancar cada `ClusterNode`:
+
+```bash
+java -Djavax.net.ssl.keyStore=server.keystore \
+     -Djavax.net.ssl.keyStorePassword=changeit \
+     -cp server/target/server-1.0-SNAPSHOT.jar \
+     cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
+```
+
+---
+
+### Paso 3: Ejecutar Cliente CON TLS
+
+El cliente requiere confiar en el certificado del clúster (Truststore). Pásale los parámetros correspondientes:
+
+```bash
+java -Djavax.net.ssl.trustStore=server.keystore \
+     -Djavax.net.ssl.trustStorePassword=changeit \
+     -cp client/target/client-1.0-SNAPSHOT.jar \
+     cluster.Client localhost:6100 localhost:6101 localhost:6102
+```
+
+---
+
+## 🔑 Propiedades JVM Explicadas
+
+| Propiedad JVM | Propósito |
+|---------------|-----------|
+| `-Djavax.net.ssl.keyStore` | Archivo con la clave privada y certificado del servidor RMI. |
+| `-Djavax.net.ssl.keyStorePassword` | Contraseña del almacén de claves (por defecto: `changeit`). |
+| `-Djavax.net.ssl.trustStore` | Archivo que contiene los certificados de los servidores en los que el cliente confía. |
+| `-Djavax.net.ssl.trustStorePassword` | Contraseña del almacén de confianza. |
+| `-Djavax.net.debug=ssl:handshake` | (Opcional) Habilita el modo debug para visualizar la traza completa del handshake TLS en consola. |
+
+---
+
+## 📊 Comparación: Con TLS vs Sin TLS
+
+| Aspecto | Sin TLS | Con TLS |
+|---------|---------|---------|
+| **Seguridad** | 🔴 Tráfico en texto claro (Vulnerable) | 🟢 Cifrado asimétrico (Seguro) |
+| **Rendimiento** | 🟢 Latencia base (~1-2ms por llamada RMI) | 🟡 ~5-10% de sobrecarga por Handshake TLS |
+| **Complejidad** | 🟢 Ninguna | 🟡 Requiere gestión e instalación de Keystores |
+| **Producción** | ❌ Desaconsejado | ✅ Altamente recomendado |
+    </script>
+
+    <script type="text/markdown" id="doc-simulaciones">
+# 🎮 Ejemplos Prácticos y Simulaciones de Fallos
+
+Este documento simula trazas reales de logs durante situaciones extremas para comprender la maquinaria interna del protocolo Gossip y los mecanismos de Failover.
+
+---
+
+## 1️⃣ Simulación: Nodo cae durante ejecución
+
+### 1. Estado Inicial del Clúster
+Tenemos tres nodos vivos procesando la telemetría balanceada en Round-Robin:
+* `NODE-1` en port 6100
+* `NODE-2` en port 6101 (activo)
+* `NODE-3` en port 6102
+
+### 2. Evento: Apagado abrupto de NODE-2
+Simulamos matar `NODE-2` (`Ctrl+C` en su terminal).
+
+### 3. Log del Cliente ante el envío:
+```text
+-> dispatching to node-2: processTelemetry(payload)
+   [Exception] node-2@localhost:6101 failed (ConnectException), trying next...
+   
+-> dispatching to node-3: processTelemetry(payload)
+   [node-3] processTelemetry(payload) -> ETL Procesado ✓
+```
+* **Comportamiento**: El cliente detecta la `ConnectException`, no propaga el error a la capa superior, selecciona inmediatamente a `node-3` y reenvía el payload sin pérdida de mensajes.
+
+### 4. Log del Gossip en NODE-1:
+```text
+[node-1] Gossip with localhost:6102... OK ✓
+[node-1] Gossip with localhost:6101... FAIL (attempt 1/3)
+[node-1] Gossip with localhost:6101... FAIL (attempt 2/3)
+[node-1] Gossip with localhost:6101... FAIL (attempt 3/3)
+Evicted (no response after 3 rounds): node-2@localhost:6101
+Tombstone set: node-2@localhost:6101 (expires in 30s)
+```
+* **Comportamiento**: Transcurridos 9 segundos, los pings fallidos provocan la expulsión (eviction) del nodo caído de la vista local y se crea la marca de exclusión temporal.
+
+---
+
+## 2️⃣ Simulación: Estructura interna de datos del clúster
+
+Visualización de cómo se estructuran los mapas de estado en memoria (`ConcurrentHashMap`) en un nodo:
+
+```java
+// Estado de NODE-1
+self = Endpoint("node-1", "localhost", 6100);
+
+members = {
+  "localhost:6100" -> Endpoint("node-1", "localhost", 6100),
+  "localhost:6101" -> Endpoint("node-2", "localhost", 6101),
+  "localhost:6102" -> Endpoint("node-3", "localhost", 6102)
+};
+
+failures = {
+  "localhost:6100" -> 0,
+  "localhost:6101" -> 0,
+  "localhost:6102" -> 0
+};
+
+tombstones = {}; // Vacío si todos están sanos.
+```
+
+### Después de que NODE-2 cae y es evictado:
+```java
+members = {
+  "localhost:6100" -> Endpoint("node-1", "localhost", 6100),
+  "localhost:6102" -> Endpoint("node-3", "localhost", 6102)
+  // node-2 eliminado de la membresía activa
+};
+
+failures = {
+  "localhost:6100" -> 0,
+  "localhost:6102" -> 0
+};
+
+tombstones = {
+  "localhost:6101" -> 1779266780000 // Timestamp Unix de caducidad (+30s)
+};
+```
+
+---
+
+## 3️⃣ Pseudocódigo del Loop Principal de Gossip
+
+Este es el algoritmo asíncrono que corre en segundo plano en cada servidor `ClusterNode`:
+
+```java
+ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+scheduler.scheduleAtFixedRate(() -> {
+    List<String> addresses = new ArrayList<>(members.keySet());
+    
+    for (String addr : addresses) {
+        if (addr.equals(self.addr())) continue; // No cotillear con uno mismo
+        
+        try {
+            Endpoint peer = members.get(addr);
+            Registry reg = LocateRegistry.getRegistry(peer.host, peer.port);
+            ComputeService stub = (ComputeService) reg.lookup("ComputeNode");
+            
+            // Llama al RMI remoto intercambiando vistas
+            Set<Endpoint> peerView = stub.gossip(self, new HashSet<>(members.values()));
+            
+            // Éxito: resetear contador de fallos e integrar nuevos miembros
+            failures.put(addr, 0);
+            for (Endpoint e : peerView) {
+                absorb(e); // Registra si no hay tombstone activo
+            }
+        } catch (Exception e) {
+            // Fallo: Incrementar contador
+            int count = failures.getOrDefault(addr, 0) + 1;
+            failures.put(addr, count);
+            
+            if (count >= 3) {
+                evict(addr); // Expulsa de la lista de miembros activos
+                tombstones.put(addr, System.currentTimeMillis() + 30000);
+            }
+        }
+    }
+    
+    // Si la lista queda vacía (partición total), se re-inicializa con las semillas
+    if (members.size() <= 1) {
+        for (Endpoint seed : seeds) {
+            absorb(seed);
+        }
+    }
+}, 0, 3, TimeUnit.SECONDS);
+```
+    </script>
+
+    <!-- Library Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+
+    <!-- Dynamic Application Logic -->
+    <script>
+        // Initialize Mermaid
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: 'dark',
+            securityLevel: 'loose'
+        });
+
+        // Theme Toggle Logic
+        const themeToggle = document.getElementById('theme-toggle');
+        const body = document.body;
+        const themeIcon = themeToggle.querySelector('i');
+        const prismThemeLink = document.getElementById('prism-theme');
+
+        // Check stored theme or default to dark
+        const currentTheme = localStorage.getItem('theme') || 'dark';
+        body.setAttribute('data-theme', currentTheme);
+        updateThemeUI(currentTheme);
+
+        themeToggle.addEventListener('click', () => {
+            const activeTheme = body.getAttribute('data-theme');
+            const newTheme = activeTheme === 'dark' ? 'light' : 'dark';
+            body.setAttribute('data-theme', newTheme);
+            localStorage.setItem('theme', newTheme);
+            updateThemeUI(newTheme);
+            
+            // Re-render Mermaid diagrams if they exist on light/dark switch
+            const activeDocId = document.querySelector('.menu-item.active').getAttribute('data-doc');
+            loadDocument(activeDocId);
+        });
+
+        function updateThemeUI(theme) {
+            if (theme === 'dark') {
+                themeIcon.className = 'fa-solid fa-sun';
+                prismThemeLink.href = "https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css";
+                mermaid.initialize({ theme: 'dark' });
+            } else {
+                themeIcon.className = 'fa-solid fa-moon';
+                prismThemeLink.href = "https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css";
+                mermaid.initialize({ theme: 'default' });
+            }
+        }
+
+        // Sidebar Navigation & Markdown Loading
+        const menuItems = document.querySelectorAll('.sidebar-menu .menu-item');
+        const contentArea = document.getElementById('rendered-content');
+        const searchInput = document.getElementById('search-input');
+
+        // Custom Renderer to parse alerts (GitHub style: [!NOTE], etc.)
+        const renderer = new marked.Renderer();
+        const originalBlockquote = renderer.blockquote;
+        renderer.blockquote = function(quote) {
+            const rawQuote = quote.trim();
+            const alertTypes = ['NOTE', 'TIP', 'IMPORTANT', 'WARNING', 'CAUTION'];
+            
+            for (const type of alertTypes) {
+                const marker = `[!${type}]`;
+                if (rawQuote.includes(marker)) {
+                    // Extract icon
+                    let icon = 'fa-info-circle';
+                    if (type === 'TIP') icon = 'fa-lightbulb';
+                    if (type === 'IMPORTANT') icon = 'fa-circle-exclamation';
+                    if (type === 'WARNING') icon = 'fa-triangle-exclamation';
+                    if (type === 'CAUTION') icon = 'fa-circle-xmark';
+                    
+                    const cleanContent = rawQuote.replace(marker, '').replace('<p>', '').replace('</p>', '').trim();
+                    
+                    return `
+                    <div class="alert-callout alert-${type.toLowerCase()}">
+                        <i class="fa-solid ${icon}"></i>
+                        <div class="alert-callout-content">
+                            <div class="alert-callout-title">${type}</div>
+                            <p>${cleanContent}</p>
+                        </div>
+                    </div>`;
+                }
+            }
+            return originalBlockquote.call(this, quote);
+        };
+        marked.setOptions({ renderer });
+
+        // Load document function
+        function loadDocument(docId) {
+            const scriptBlock = document.getElementById(`doc-${docId}`);
+            if (!scriptBlock) return;
+
+            let mdText = scriptBlock.textContent;
+            
+            // Reset search input
+            searchInput.value = '';
+
+            // Render Markdown
+            const htmlContent = marked.parse(mdText);
+            contentArea.innerHTML = htmlContent;
+
+            // Render Mermaid Diagrams if present
+            const preBlocks = contentArea.querySelectorAll('pre');
+            preBlocks.forEach(pre => {
+                const codeBlock = pre.querySelector('code.language-mermaid') || pre.querySelector('code.language-text');
+                if (codeBlock && (codeBlock.className.includes('language-mermaid') || codeBlock.textContent.includes('graph TD') || codeBlock.textContent.includes('sequenceDiagram'))) {
+                    // Transform to Mermaid div
+                    const mermaidDiv = document.createElement('div');
+                    mermaidDiv.className = 'mermaid';
+                    mermaidDiv.textContent = codeBlock.textContent;
+                    pre.replaceWith(mermaidDiv);
+                }
+            });
+            
+            // Parse Mermaid
+            try {
+                mermaid.run();
+            } catch (err) {
+                console.error("Error parsing Mermaid diagram:", err);
+            }
+
+            // Syntax Highlight Code Blocks
+            Prism.highlightAllUnder(contentArea);
+
+            // Add Copy Buttons to Code Blocks
+            const newPreBlocks = contentArea.querySelectorAll('pre');
+            newPreBlocks.forEach(pre => {
+                // Ignore mermaid divs
+                if (pre.classList.contains('mermaid')) return;
+                
+                pre.style.position = 'relative';
+                const copyBtn = document.createElement('button');
+                copyBtn.className = 'copy-btn';
+                copyBtn.innerHTML = '<i class="fa-solid fa-copy"></i> Copiar';
+                
+                copyBtn.addEventListener('click', () => {
+                    const codeText = pre.querySelector('code').innerText;
+                    navigator.clipboard.writeText(codeText).then(() => {
+                        copyBtn.innerHTML = '<i class="fa-solid fa-check"></i> Copiado!';
+                        copyBtn.classList.add('copied');
+                        setTimeout(() => {
+                            copyBtn.innerHTML = '<i class="fa-solid fa-copy"></i> Copiar';
+                            copyBtn.classList.remove('copied');
+                        }, 2000);
+                    });
+                });
+                pre.appendChild(copyBtn);
+            });
+        }
+
+        // Initialize with default readme
+        loadDocument('readme');
+
+        // Sidebar clicks
+        menuItems.forEach(item => {
+            item.addEventListener('click', () => {
+                menuItems.forEach(i => i.classList.remove('active'));
+                item.classList.add('active');
+                
+                const docId = item.getAttribute('data-doc');
+                loadDocument(docId);
+                
+                // Close sidebar on mobile
+                if (window.innerWidth <= 1024) {
+                    sidebar.classList.remove('open');
+                }
+            });
+        });
+
+        // Hamburger Menu toggle
+        const hamburger = document.getElementById('hamburger');
+        const sidebar = document.getElementById('sidebar');
+        
+        hamburger.addEventListener('click', () => {
+            sidebar.classList.toggle('open');
+        });
+
+        // Close sidebar clicking outside on mobile
+        document.addEventListener('click', (e) => {
+            if (window.innerWidth <= 1024) {
+                if (!sidebar.contains(e.target) && !hamburger.contains(e.target) && sidebar.classList.contains('open')) {
+                    sidebar.classList.remove('open');
+                }
+            }
+        });
+
+        // Search highlight function
+        searchInput.addEventListener('input', () => {
+            const query = searchInput.value.toLowerCase().trim();
+            const activeDocId = document.querySelector('.menu-item.active').getAttribute('data-doc');
+            
+            // Reload original state of document first
+            loadDocument(activeDocId);
+            
+            if (query === '') return;
+
+            // Highlight matches in text nodes
+            const walkTextNodes = (node) => {
+                if (node.nodeType === Node.TEXT_NODE) {
+                    const text = node.textContent;
+                    const index = text.toLowerCase().indexOf(query);
+                    if (index >= 0 && node.parentElement.tagName !== 'CODE' && node.parentElement.tagName !== 'PRE') {
+                        const parent = node.parentElement;
+                        const regex = new RegExp(`(${query.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')})`, 'gi');
+                        const newHTML = text.replace(regex, `<span class="search-highlight">$1</span>`);
+                        
+                        const tempDiv = document.createElement('div');
+                        tempDiv.innerHTML = newHTML;
+                        
+                        while (tempDiv.firstChild) {
+                            parent.insertBefore(tempDiv.firstChild, node);
+                        }
+                        parent.removeChild(node);
+                    }
+                } else if (node.nodeType === Node.ELEMENT_NODE && node.childNodes) {
+                    // Do not search inside code, pre, script, or custom structures
+                    if (node.tagName !== 'CODE' && node.tagName !== 'PRE' && node.tagName !== 'SCRIPT') {
+                        Array.from(node.childNodes).forEach(walkTextNodes);
+                    }
+                }
+            };
+
+            walkTextNodes(contentArea);
+        });
+    </script>
+</body>
+</html>

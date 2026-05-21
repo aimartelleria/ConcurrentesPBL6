@@ -66,16 +66,18 @@ Es como una red de computadoras donde cada una es independiente, pero todas se c
 Interface ComputeService (Remote)
 ├── getNodeId() → String
 ├── ping() → long (prueba que esté vivo)
-├── compute(double) → double (operación de negocio)
+├── executeTask(Task<T>) → T (motor de computación genérico)
+├── processTelemetry(byte[]) → void (procesamiento ETL de Avro)
 └── gossip(sender, theirView) → Set<Endpoint> (descubrimiento)
 ```
 
 **¿Por qué Remote?** Para que otros programas Java puedan llamar estos métodos a través de la red.
 
 **¿Qué hace cada método?**
-- `compute(double)`: Calcula sqrt(abs(input)) * 2.0 → Es la "tarea" que hace el cluster
-- `gossip(...)`: Intercambia información sobre qué nodos existen (protocolo anti-entropy)
-- `ping()`: Verifica que el nodo siga vivo
+- `executeTask(Task<T>)`: Ejecuta una tarea genérica enviada por el cliente (Compute Engine).
+- `processTelemetry(byte[])`: Procesa métricas en formato Avro a través de Virtual Threads, calculando el Stress Score.
+- `gossip(...)`: Intercambia información sobre qué nodos existen (protocolo anti-entropy).
+- `ping()`: Verifica que el nodo siga vivo.
 
 ---
 
@@ -138,24 +140,24 @@ Una marca que dice "este nodo estaba muerto". Evita que otros nodos sigan intent
    └─ Si todos fallan → Refresca lista y reintenta
 
 4. Ejecuta tarea
-   └─ compute(valor) en cualquier nodo disponible
+   └─ processTelemetry(valor) en cualquier nodo disponible
 ```
 
 **¿Qué simula el cliente?**
-- Una aplicación que necesita hacer cálculos (ej: un servidor web, un procesador de datos)
-- En el `main()` hace 12 llamadas: `compute(0.0), compute(1.5), compute(3.0)...`
-- Cada llamada es: "Nodo X, hazme el cálculo de sqrt(abs(valor)) * 2"
-- Simula: **Balanceo de carga, recuperación de fallos, y descubrimiento dinámico**
+- Un puente (consumidor) que recibe datos desde RabbitMQ y los pasa al cluster.
+- En el `main()` se conecta a RabbitMQ (usando Virtual Threads) y consume de la cola `telemetry_java_consumer_queue`.
+- Por cada mensaje Avro recibido, hace: `processTelemetry(payload)` a un nodo del cluster.
+- Simula: **Ingesta asíncrona, balanceo de carga, recuperación de fallos, y descubrimiento dinámico**.
 
 ---
 
 ## 🔄 Flujo Completo: Paso a Paso
 
-### Escenario: Cliente quiere hacer `compute(1.5)`
+### Escenario: Cliente quiere procesar telemetría `processTelemetry(payload)`
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ CLIENT                                                       │
+│ CLIENT (Consumer de RabbitMQ)                                │
 └─────────────────────────────────────────────────────────────┘
                               │
                     ¿Conozco miembros?
@@ -167,14 +169,14 @@ Una marca que dice "este nodo estaba muerto". Evita que otros nodos sigan intent
               Llamo a seed    Intento nodo siguiente
               (NODE-1)        (NODE-2)
                      │         │
-              "Dame lista"  "Calcula 1.5"
+              "Dame lista"  "Procesa telemetría (Avro)"
                      │         │
-              ✓ Responde    ✓ Responde
+              ✓ Responde    ✓ Responde y procesa ETL
                      │         │
-             Guardo lista    Devuelvo resultado
-             [members]        sqrt(1.5)*2 = 2.449
+             Guardo lista    Ack a RabbitMQ
+             [members]        
                      │
-            Siguiente call
+            Siguiente mensaje
             round-robin
             (NODE-3)
 ```
@@ -204,7 +206,7 @@ Antes:  [CLIENT] ←→ NODE-1 ✓
                ↓ (corte de red)
 Después: [CLIENT] ✗ NODE-1 ✓
 
-Cliente intenta compute():
+Cliente intenta processTelemetry():
 - Intenta NODE-1: TIMEOUT ❌
 - Refresca lista de miembros: FALLA (sin conexión)
 - Lanza excepción: "All members failed even after a refresh"
@@ -240,22 +242,22 @@ Gossip recibe:
 
 ### Terminal 1: Inicia NODE-1
 ```bash
-java cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
 ```
 
 ### Terminal 2: Inicia NODE-2
 ```bash
-java cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
 ```
 
 ### Terminal 3: Inicia NODE-3
 ```bash
-java cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
 ```
 
 ### Terminal 4: Ejecuta el cliente
 ```bash
-java cluster.Client localhost:6100 localhost:6101 localhost:6102
+java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102
 ```
 
 ---
@@ -273,7 +275,7 @@ Si al menos UNA responde, el cliente obtiene la lista completa de todos.
 // En máquina remota
 Registry reg = LocateRegistry.getRegistry("localhost", 6100);
 ComputeService stub = (ComputeService) reg.lookup("ComputeNode");
-double resultado = stub.compute(1.5);  // ¡Llamada remota!
+stub.processTelemetry(payload);  // ¡Llamada remota!
 ```
 
 ### P3: ¿Qué pasa si TODOS los nodos se caen?
@@ -320,7 +322,7 @@ Cuando se reconecta, habrá un período de convergencia. Este diseño NO resuelv
 - **Sin garantías de consistencia** (eventual consistency)
 - **No resuelve split-brain** (particiones de red)
 - **RMI es lento** (Java puro, sin protobuf/gRPC)
-- **Sin encriptación** (RMI plano)
+- **Encriptación vía TLS**: Implementada vía properties JVM (ver `RUN_WITH_TLS.md`)
 - **Gossip periódico**: Detección de fallos toma tiempo
 
 ---
@@ -328,13 +330,13 @@ Cuando se reconecta, habrá un período de convergencia. Este diseño NO resuelv
 ## 🔍 Flujo de Código: Cliente → Nodo
 
 ```
-CLIENT.compute(1.5)
+CLIENT.processTelemetry(payload)
   ↓
 ¿members está vacío? → SÍ: refresh() → GOSSIP con seed
   ↓ NO
 Selecciona nodo con round-robin (cursor)
   ↓
-RMI: stub.compute(1.5)  [TIMEOUT/EXCEPTION]
+RMI: stub.processTelemetry(payload)  [TIMEOUT/EXCEPTION]
   ↓
 ¿Hay más nodos? → SÍ: Intenta siguiente
                  NO: refresh() + retry
@@ -354,7 +356,7 @@ Imagina un sistema de **procesamiento de imágenes distribuido**:
 │  (recibe fotos)  │
 └──────────────────┘
          ↓
-    compute(foto)
+    processTelemetry(foto)
          ↓
     ┌──────┬──────┬──────┐
     ↓      ↓      ↓      ↓

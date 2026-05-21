@@ -27,11 +27,11 @@ if not exist "server.keystore" (
 REM ============= STEP 2: Compilar =============
 echo.
 echo [2/4] Compilando archivos Java...
-if not exist "src\cluster" (
-    echo ERROR: Directorio src\cluster no encontrado
+if not exist "server\src" (
+    echo ERROR: Proyecto no estructurado correctamente
     exit /b 1
 )
-javac src\cluster\*.java 2>nul
+call mvn clean package -DskipTests
 if !ERRORLEVEL! NEQ 0 (
     echo ERROR: Fallo la compilación
     exit /b 1
@@ -46,15 +46,15 @@ echo.
 set "JAVA_OPTS=-Djavax.net.ssl.keyStore=server.keystore -Djavax.net.ssl.keyStorePassword=changeit"
 
 echo   → NODE-1 (puerto 6100)
-start "NODE-1" cmd /k "cd /d "%~dp0" && java %JAVA_OPTS% -cp src cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102"
+start "NODE-1" cmd /k "cd /d "%~dp0" && java %JAVA_OPTS% -cp server\target\server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102"
 timeout /t 2 /nobreak
 
 echo   → NODE-2 (puerto 6101)
-start "NODE-2" cmd /k "cd /d "%~dp0" && java %JAVA_OPTS% -cp src cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102"
+start "NODE-2" cmd /k "cd /d "%~dp0" && java %JAVA_OPTS% -cp server\target\server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102"
 timeout /t 2 /nobreak
 
 echo   → NODE-3 (puerto 6102)
-start "NODE-3" cmd /k "cd /d "%~dp0" && java %JAVA_OPTS% -cp src cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102"
+start "NODE-3" cmd /k "cd /d "%~dp0" && java %JAVA_OPTS% -cp server\target\server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102"
 timeout /t 3 /nobreak
 
 REM ============= STEP 4: Iniciar Cliente =============
@@ -64,7 +64,7 @@ echo.
 
 set "CLIENT_OPTS=-Djavax.net.ssl.trustStore=server.keystore -Djavax.net.ssl.trustStorePassword=changeit"
 
-start "CLIENT" cmd /k "cd /d "%~dp0" && java %CLIENT_OPTS% -cp src cluster.Client localhost:6100 localhost:6101 localhost:6102"
+start "CLIENT" cmd /k "cd /d "%~dp0" && java %CLIENT_OPTS% -cp client\target\client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102"
 
 echo.
 echo ====================================================
