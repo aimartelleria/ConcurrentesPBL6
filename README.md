@@ -109,6 +109,7 @@ needed. Restart a node and it rejoins on first gossip; you'll see
   client config. The seed list is the only "I have to know something"
   step; everything after is discovered.
 - **Wire encryption is supported.** We use JVM SSL properties (e.g. `-Djavax.net.ssl.trustStore`) for encryption across untrusted networks. Ver `RUN_WITH_TLS.md`.
+- **Despliegue en cloud (GCP).** Todo el stack (Kafka + Client + 3 nodos) se sube con un solo comando: `cp .env.example .env` → editar → `./deploy-gcp.sh`. Ver `DEPLOY_GCP.md` para la guía completa (GCE turnkey y GKE).
 
 ## Known limits
 

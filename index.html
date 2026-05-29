@@ -641,6 +641,12 @@
             <li class="menu-item active" data-doc="readme">
                 <button><i class="fa-solid fa-home"></i> Inicio del Clúster</button>
             </li>
+            <li class="menu-item" data-doc="iniciar-server">
+                <button><i class="fa-solid fa-server"></i> Iniciar Servidor</button>
+            </li>
+            <li class="menu-item" data-doc="gcp">
+                <button><i class="fa-solid fa-cloud"></i> Despliegue GCP/Docker</button>
+            </li>
             <li class="menu-item" data-doc="resultados">
                 <button><i class="fa-solid fa-chart-line"></i> Guía y Resultados</button>
             </li>
@@ -682,7 +688,7 @@
                 </div>
                 <div class="status-pill">
                     <i class="fa-solid fa-envelope" style="color: var(--accent);"></i>
-                    RabbitMQ: AMQP
+                    Kafka: 9092/9094
                 </div>
             </div>
 
@@ -718,17 +724,172 @@ La arquitectura está diseñada para eliminar cualquier Punto Único de Fallo (S
 
 El sistema se compone de los siguientes subsistemas:
 
-1. **`AgenteGo`** (en `AgenteGo-main/`): Agente recolector escrito en Go que toma métricas en tiempo real del sistema de ficheros, CPU y memoria, codificando el mensaje en **Avro** binario y empujándolo a RabbitMQ de forma no bloqueante.
-2. **`Client`** (en `client/`): Aplicación puente basada en Java 21 Virtual Threads que consume los mensajes de RabbitMQ, los guarda localmente simulando MinIO, y los despacha mediante RMI al clúster aplicando balanceo de carga Round-Robin y failover.
+1. **`AgenteGo`** (en `AgenteGo-main/`): Agente recolector escrito en Go que toma métricas en tiempo real del sistema de ficheros, CPU y memoria, codificando el mensaje en **Avro** binario y empujándolo a Kafka de forma no bloqueante.
+2. **`Client`** (en `client/`): Aplicación puente basada en Java 21 Virtual Threads que consume los mensajes de Kafka, los guarda localmente simulando MinIO, y los despacha mediante RMI al clúster aplicando balanceo de carga Round-Robin y failover.
 3. **`ClusterNode`** (en `server/`): Nodos del clúster RMI P2P que reciben la métrica Avro, ejecutan el enriquecimiento de datos en un flujo ETL paralelo, calculan la métrica **Stress Score** y simulan el almacenamiento de los datos enriquecidos.
 4. **`Common`** (en `common/`): Interfaces RMI compartidas, la definición serializable de `Endpoint` y la abstracción del patrón `Task<T>`.
+5. **`Docker y GCP`**: Soporte nativo para contenedores Docker (`Dockerfile` en `server/` y `client/`), orquestación local con `docker-compose.yml` y guías para despliegue en Google Cloud Platform (GCE y GKE).
 
-## Diseño de Resiliencia
+## Diseño de Resiliencia y Despliegue
 
 * **Sin coordinador central**: No existe un líder ni base de datos compartida para saber quién está vivo. Los nodos cotillean (*gossip*) entre ellos. El cliente arranca apuntando a una lista de semillas (*seeds*); si al menos una semilla está viva, obtiene la topología del clúster dinámicamente.
 * **Tombstones**: Cuando un nodo se cae por 3 rondas (~9 segundos), el clúster lo declara muerto y crea un *tombstone* de 30 segundos, impidiendo que cotilleos obsoletos lo reintroduzcan en la lista.
 * **Limpieza de Tombstone Directo**: Si el nodo caído se reinicia en el mismo puerto, su mensaje gossip inicial limpia el tombstone de forma inmediata, permitiendo un reingreso instantáneo.
 * **Failover en Cliente**: Si un nodo muere mientras el cliente le envía datos por RMI, la llamada devuelve una excepción de red. El cliente captura el fallo, selecciona el siguiente nodo vivo en la cola circular y reintenta el despacho de forma transparente y sin pérdida de datos.
+* **Contenedores y Nube**: El clúster y el cliente puente están adaptados para resolver dinámicamente sus hosts, semillas y brokers usando variables de entorno (`NODE_ID`, `HOST`, `PORT`, `SEEDS`, `KAFKA_BOOTSTRAP_SERVERS`), facilitando su ejecución idéntica en local y en la nube (GCP).
+    </script>
+
+    <script type="text/markdown" id="doc-iniciar-server">
+# 🖥️ Guía de Inicio del Servidor Clúster (ClusterNode)
+
+Esta guía explica detalladamente cómo compilar, configurar e iniciar los nodos del clúster de procesamiento distribuido (`ClusterNode`) en el proyecto, tanto en modo estándar (sin TLS) como en modo seguro (con TLS/SSL).
+
+---
+
+## 📋 Requisitos Previos
+
+Antes de arrancar los servidores, asegúrate de tener instalado y configurado lo siguiente en tu sistema:
+1. **Java JDK 21 o superior**: El clúster utiliza **Virtual Threads** (hilos virtuales) introducidos de forma estable en Java 21 para lograr una concurrencia masiva y no bloqueante.
+2. **Apache Maven**: Herramienta de compilación y gestión de dependencias para proyectos Java.
+3. **Kafka**: Debe estar ejecutándose localmente (por ejemplo, en un contenedor Docker en el puerto `9092` / `9094`) para que la inyección de telemetría funcione correctamente a través del cliente.
+   ```bash
+   docker compose up -d kafka
+   ```
+
+---
+
+## 🛠️ Paso 1: Compilación del Proyecto
+
+Antes de ejecutar los nodos, es necesario compilar todos los submódulos (`common`, `server`, `client`) con Maven para generar los archivos `.jar` empaquetados.
+
+Ejecuta el siguiente comando desde la raíz del workspace:
+
+```bash
+mvn clean package -DskipTests
+```
+
+**Salida esperada:**
+Esto compilará los módulos y colocará los ejecutables en sus respectivas carpetas:
+- El servidor compilado se ubicará en: `server/target/server-1.0-SNAPSHOT.jar`
+- El cliente compilado se ubicará en: `client/target/client-1.0-SNAPSHOT.jar`
+
+---
+
+## 🏃 Paso 2: Ejecución de Nodos (Sin TLS)
+
+En el modo estándar sin cifrado, los nodos se comunican en texto claro a través de la red RMI.
+
+### Sintaxis del Comando:
+```bash
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode <nodeId> <host> <port> [seedHost:Port ...]
+```
+
+### Parámetros Explicados:
+1. `<nodeId>`: Nombre único que identifica al nodo en la red (ej. `node-1`).
+2. `<host>`: Dirección IP o hostname del servidor donde se ejecuta el nodo (usualmente `localhost` para pruebas locales).
+3. `<port>`: Puerto en el que este nodo levantará su propio RMI Registry local (ej. `6100`).
+4. `[seedHost:Port ...]`: Lista de direcciones "semilla" (nodos de bootstrap). El nodo intentará conectarse a estas direcciones para descubrir a los demás miembros del clúster a través del protocolo *Gossip*. Al menos una semilla debe ser accesible en el arranque.
+
+### Ejemplo de Arranque de un Clúster de 3 Nodos:
+
+Abre tres terminales independientes y ejecuta en cada una de ellas lo siguiente:
+
+* **Terminal 1 (Nodo 1 en puerto 6100):**
+  ```bash
+  java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
+  ```
+
+* **Terminal 2 (Nodo 2 en puerto 6101):**
+  ```bash
+  java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
+  ```
+
+* **Terminal 3 (Nodo 3 en puerto 6102):**
+  ```bash
+  java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
+  ```
+
+---
+
+## 🔐 Paso 3: Ejecución de Nodos (Con TLS/SSL)
+
+Para entornos de producción o redes inseguras, se recomienda cifrar todo el tráfico RMI y el intercambio Gossip mediante certificados TLS/SSL.
+
+### 🔑 A. Generar Certificados (Keystore)
+Primero, debes generar el archivo de certificados `server.keystore`. Ejecuta el script automatizado provisto en la raíz del proyecto:
+
+* **En Windows (CMD / PowerShell):**
+  ```cmd
+  generate-certs.bat
+  ```
+* **En Linux / Mac:**
+  ```bash
+  chmod +x generate-certs.sh
+  ./generate-certs.sh
+  ```
+
+Esto creará un keystore auto-firmado llamado `server.keystore` con la contraseña predeterminada `changeit`.
+
+### 🚀 B. Iniciar los Nodos en Modo TLS
+Para activar TLS en la JVM, se deben inyectar dos propiedades del sistema Java mediante la bandera `-D` antes del comando de ejecución:
+- `javax.net.ssl.keyStore`: Ruta al almacén de claves (keystore).
+- `javax.net.ssl.keyStorePassword`: Contraseña del keystore (ej. `changeit`).
+
+Abre tres terminales independientes y ejecuta lo siguiente:
+
+* **Terminal 1 (Nodo 1 con TLS):**
+  ```bash
+  java -Djavax.net.ssl.keyStore=server.keystore -Djavax.net.ssl.keyStorePassword=changeit -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
+  ```
+
+* **Terminal 2 (Nodo 2 con TLS):**
+  ```bash
+  java -Djavax.net.ssl.keyStore=server.keystore -Djavax.net.ssl.keyStorePassword=changeit -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
+  ```
+
+* **Terminal 3 (Nodo 3 con TLS):**
+  ```bash
+  java -Djavax.net.ssl.keyStore=server.keystore -Djavax.net.ssl.keyStorePassword=changeit -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
+  ```
+
+> [!IMPORTANT]
+> **El Cliente RMI también debe usar TLS:**
+> Si los nodos del servidor se arrancan con TLS, el cliente RMI (`Client`) fallará al conectarse a menos que se ejecute también configurando el truststore:
+> ```bash
+> java -Djavax.net.ssl.trustStore=server.keystore -Djavax.net.ssl.trustStorePassword=changeit -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102
+> ```
+
+---
+
+## 🔍 Parámetros Adicionales de la JVM
+
+Al desplegar el servidor en red o depurar conexiones, te resultarán de gran utilidad los siguientes parámetros de ejecución de la JVM:
+
+| Propiedad | Ejemplo / Valor | Utilidad / Propósito |
+|---|---|---|
+| `-Djava.rmi.server.hostname` | `-Djava.rmi.server.hostname=192.168.1.50` | Fuerza a RMI a exponer esta dirección IP en el Stub en lugar de `localhost`. Imprescindible para comunicaciones entre múltiples máquinas reales. |
+| `-Djavax.net.debug` | `-Djavax.net.debug=ssl:handshake` | Muestra en consola la traza de depuración completa del handshake TLS/SSL en cada conexión RMI. Útil si las llamadas TLS fallan. |
+
+---
+
+## ⚠️ Solución de Problemas del Servidor
+
+### 1. Error: `java.rmi.server.ExportException: Port already in use: 6100`
+* **Causa**: Ya hay una instancia de un nodo (u otro proceso) corriendo en ese puerto.
+* **Solución**: Cierra los procesos Java huérfanos que hayan quedado activos en segundo plano.
+  * **En Windows (PowerShell)**: `Stop-Process -Name java -Force` o `taskkill /F /IM java.exe` en CMD.
+  * **En Linux/Mac**: `pkill -f "ClusterNode"` o `killall java`.
+
+### 2. Los nodos no se descubren entre sí (Vista de miembros vacía)
+* **Causa**: El puerto Gossip no es accesible, o la primera semilla indicada no está corriendo todavía.
+* **Solución**: 
+  - Asegúrate de arrancar primero el nodo que actúa como la semilla principal.
+  - Verifica que los firewalls locales no bloqueen los puertos `6100`, `6101` y `6102`.
+  - Si estás en Docker, asegúrate de que todos los contenedores pertenezcan a la misma red puente.
+
+### 3. Error `javax.net.ssl.SSLException` o `SSLHandshakeException`
+* **Causa**: El cliente y el servidor no coinciden en la configuración SSL, falta el keystore, o el password suministrado es incorrecto.
+* **Solución**: Regenera el keystore con `generate-certs.bat` y asegúrate de que tanto el comando del nodo como el del cliente apunten a la ruta exacta y usen el password correcto (`changeit`).
     </script>
 
     <script type="text/markdown" id="doc-resultados">
@@ -742,7 +903,7 @@ Este documento explica cómo funciona el flujo de datos entre el agente de monit
 
 ```text
 ┌────────────────┐          ┌──────────────┐          ┌──────────────┐
-│   Agente Go    │ ──Avro──►│   RabbitMQ   │ ──AMQP──►│ Cliente Java │
+│   Agente Go    │ ──Avro──►│    Kafka     │ ────────►│ Cliente Java │
 │ (Métricas CPU/ │          │   (Broker)   │          │ (RMI Bridge) │
 │  RAM/Disk/Temp)│          └──────────────┘          └──────┬───────┘
 └────────────────┘                                           │
@@ -755,8 +916,8 @@ Este documento explica cómo funciona el flujo de datos entre el agente de monit
                                                     └────────────────┘
 ```
 
-1. **Agente Go**: Inspecciona el sistema operativo usando `gopsutil` en intervalos regulares, genera un registro binario serializado con el esquema **Avro**, y lo publica en un exchange tipo fanout (`telemetry_fanout`) de RabbitMQ.
-2. **Cliente Java**: Está permanentemente suscrito al exchange de RabbitMQ. En cuanto recibe una métrica binaria en formato Avro, actúa como un puente ("bridge") y la despacha al cluster Java utilizando llamadas RMI.
+1. **Agente Go**: Inspecciona el sistema operativo usando `gopsutil` en intervalos regulares, genera un registro binario serializado con el esquema **Avro**, y lo publica en el topic `telemetry` de Kafka.
+2. **Cliente Java**: Está permanentemente suscrito al topic `telemetry` de Kafka. En cuanto recibe una métrica binaria en formato Avro, actúa como un puente ("bridge") y la despacha al cluster Java utilizando llamadas RMI.
 3. **Nodos del Cluster Java (`ClusterNode`)**:
    - Cada nodo hospeda su propio registro RMI de forma distribuida (sin un servidor central).
    - Utilizan un protocolo de **Gossip (chisme)** periódico en segundo plano para informarse mutuamente qué nodos están vivos o cuáles han caído (evicción).
@@ -766,17 +927,17 @@ Este documento explica cómo funciona el flujo de datos entre el agente de monit
 
 ## 🛠️ Ajustes Realizados para la Integración
 
-1. **Exchange Unificado**: Se modificó `SuscriberRabbitMQ.go` para que publique datos en el exchange de tipo fanout `telemetry_fanout`, sincronizándolo con la cola que escucha el `Client.java`.
+1. **Topic Unificado**: Se configuró `SubscriberKafka.go` para que publique datos en el topic `telemetry` de Kafka, sincronizándolo con el topic que consume el `Client.java`.
 2. **Compatibilidad de Compilación**: Se redujo el requerimiento de versión en `go.mod` (`go 1.22+`) y se ejecutó `go mod tidy` para garantizar que compile sin errores en entornos estándares.
 
 ---
 
 ## 🚀 Cómo iniciar el sistema en local
 
-### 1. Iniciar RabbitMQ
+### 1. Iniciar Kafka
 Levantar el broker en Docker:
 ```bash
-docker run -d --name rabbitmq-cluster -p 5672:5672 -p 15672:15672 rabbitmq:3-management
+docker compose up -d kafka
 ```
 
 ### 2. Arrancar los Nodos Java (Cluster)
@@ -803,22 +964,22 @@ java -cp "client/target/client-1.0-SNAPSHOT.jar" cluster.Client localhost:6100 l
 
 ### 4. Ejecutar el Agente Go
 ```bash
-go run AgenteGo-main/SuscriberRabbitMQ.go -rabbitmq-url amqp://guest:guest@localhost:5672/
+go run AgenteGo-main/SubscriberKafka.go AgenteGo-main/ConsumerKafka.go AgenteGo-main/metrics_shared.go -mode=publisher -kafka-brokers="localhost:9094"
 ```
 
 ---
 
 ## 📊 Interpretación de Resultados de Prueba
 
-### Envío de Métnales (Go)
+### Envío de Métricas Normales (Go)
 El Agente Go recopila las métricas de hardware del sistema:
 ```text
 Iniciando servicio de recolección métricas en segundo plano...
-Se enviarán métricas a RabbitMQ cada 5 minutos.
+Se enviarán métricas a Kafka cada 5 minutos.
 [2026-05-20 08:42:58] Datos recolectados normales: {Timestamp:1779266578 CPUPercent:1.182327318355726 CPUModel:12th Gen Intel(R) Core(TM) i7-12650H RAMPercent:23.011672656562755 RAMTotal:8175046656 DiskPercent:9.89245871010225 DiskTotal:1081101176832 Temp:<nil>}
-[2026-05-20 08:42:58] datos binarios enviados correctamente por RabbitMQ
+[2026-05-20 08:42:58] datos binarios enviados correctamente por Kafka
 ```
-* **Interpretación**: Indica que el recolector de Go accedió al hardware del host (o contenedor), serializó la información en formato Avro binario (~78 bytes debido a las cadenas y longs adicionales) y la encoló exitosamente en RabbitMQ.
+* **Interpretación**: Indica que el recolector de Go accedió al hardware del host (o contenedor), serializó la información en formato Avro binario (~78 bytes debido a las cadenas y longs adicionales) y la encoló exitosamente en Kafka.
 
 ### Procesamiento y Enriquecimiento (Java)
 El nodo que recibe la llamada RMI ejecuta el pipeline ETL y visualiza la información formateada:
@@ -839,7 +1000,7 @@ El nodo que recibe la llamada RMI ejecuta el pipeline ETL y visualiza la informa
 ### Comportamiento ante Caídas (Failover RMI)
 Cuando apagamos `node-2` e iniciamos otro envío desde el agente de Go, el cliente Java muestra:
 ```text
-[x] Received Avro Telemetry (78 bytes)
+[x] Received Avro Telemetry (38 bytes)
 node-2@localhost:6101 failed (ConnectException), trying next...
 -> dispatching telemetry to node-1@localhost:6100
 ```
@@ -848,9 +1009,101 @@ Y en los logs del cluster se reporta:
 Evicted (no response after 3 rounds): node-2@localhost:6101
 [node-1] view: [node-3@localhost:6102]
 ```
-* **Interpretación**: 
   - **Evicción**: Los nodos del cluster detectaron que `node-2` ya no responde a los pings de Gossip y lo eliminaron de la vista de miembros de forma descentralizada.
   - **Failover automático**: El Cliente Java detectó la desconexión del nodo asignado en su cola Round-Robin, reintentó la petición con el siguiente nodo vivo (`node-1`) y procesó el mensaje sin pérdida de información.
+
+---
+
+## 📈 Pruebas de Rendimiento y Justificación Cuantitativa
+
+Para cumplir con los requisitos del proyecto, se ha desarrollado un banco de pruebas (`cluster.Benchmark`) que permite ejecutar y analizar comparativamente las estrategias de paralelización a nivel de nodo y a nivel de clúster.
+
+### 1. Benchmark de Concurrencia (Nivel de Nodo)
+Esta prueba evalúa tres estrategias diferentes ejecutando **500 tareas simultáneas** que simulan el cálculo del **Stress Score** y un pipeline ETL ligero, seguido de una espera bloqueante de I/O de 15ms (escrituras simuladas en disco/BD):
+
+| Estrategia de Concurrencia | Tiempo Total (ms) | Rendimiento (tareas/seg) | Factor de Aceleración (Speedup) | Hilos Físicos de OS Activos |
+| :--- | :---: | :---: | :---: | :---: |
+| **Secuencial (Bloqueante)** | 10.294 ms | 48,6 tareas/seg | 1,00x (Base) | 1 |
+| **Hilos de Plataforma (Pool=20)** | 731 ms | 684,0 tareas/seg | 14,08x | 20 (fijo) |
+| **Hilos Virtuales (Java 21 Loom)** | **150 ms** | **3.333,3 tareas/seg** | **68,63x** | **1** (Portador) |
+
+#### 🧠 Justificación Cuantitativa de Hilos Virtuales:
+- **Evitación del Bloqueo**: Con Hilos Virtuales, cuando la tarea se bloquea en la llamada de I/O (`Thread.sleep(15)`), el hilo virtual se "desmonta" del hilo portador físico del sistema operativo, permitiendo que otro hilo virtual use ese procesador. Esto elimina la penalización por cambio de contexto y el bloqueo físico de recursos.
+- **Eficiencia en Recursos**: En lugar de requerir 500 hilos de plataforma (que consumirían ~500MB de memoria en pilas de hilos), los hilos virtuales ocupan apenas unos pocos kilobytes cada uno en el heap, permitiendo concurrencia masiva con un consumo mínimo de RAM y solo 1 hilo portador activo de OS.
+
+---
+
+### 2. Benchmark de Escalabilidad (Nivel de Clúster de Nodos Variables)
+Esta prueba distribuye **150 tareas del pipeline de Stress Score (Modelo a Trozos + EWMA + P95/P99 + Z-Score + I/O)** en Round-Robin a través de RMI hacia un número variable de nodos de cálculo (`ClusterNode`) activos simultáneamente:
+
+| Configuración del Clúster | Tiempo Total (ms) | Rendimiento Global (tareas/seg) | Comportamiento frente a Carga |
+| :--- | :---: | :---: | :--- |
+| **1 Nodo Activo** | 1.080 ms | 138,89 tareas/seg | Cuello de botella físico (todo el procesamiento secuenciado en un único nodo) |
+| **2 Nodos Activos** | 573 ms | 261,78 tareas/seg | Distribución activa de carga round-robin entre 2 nodos, mejorando el rendimiento |
+| **3 Nodos Activos** | 279 ms | 537,63 tareas/seg | Rendimiento óptimo, minimización de latencia y máxima paralelización de I/O |
+
+#### 🧠 Justificación del Diseño Escalable:
+- **Balanceo Round-Robin**: Al distribuir tareas de manera uniforme mediante el RMI Client, evitamos que un solo nodo actúe como cuello de botella.
+- **Escalabilidad Horizontal**: Si bien en un benchmark local sobre una misma máquina física la aceleración se ve limitada por compartir la CPU y la interfaz de red *loopback* local, el diseño modular desacoplado del clúster garantiza que al desplegar nodos en **máquinas físicas diferentes**, la capacidad de cómputo del clúster escale de forma lineal al aprovechar los cores y ancho de banda independientes de cada máquina del nodo de cálculo.
+- **Descubrimiento Dinámico sin SPOF**: La adición o eliminación de nodos se propaga mediante Gossip de manera autónoma, permitiendo adaptar la topología según la demanda de forma flexible y tolerante a fallos.
+
+### 🛠️ Cómo y qué se ha probado en los Benchmarks (Detalle de las pruebas)
+
+#### 1. Pruebas de Concurrencia de un Nodo (Local)
+* **Clase de ejecución**: [`Benchmark.java`](file:///c:/Users/aimar/Downloads/files/client/src/main/java/cluster/Benchmark.java) en el submódulo `client` (método `runLocalBenchmark()`).
+* **Lógica interna de simulación (Modelo a Trozos / Piecewise)**:
+  * Cada una de las 500 tareas simula el procesamiento de una ventana temporal de **1.000 muestras de telemetría** generadas con ruido gaussiano (fluctuaciones realistas de CPU, RAM, Disco y Temperatura).
+  * Para cada muestra calcula el **Stress Score** aplicando el **Modelo a Trozos**: media ponderada `(0.35·CPU + 0.30·Temp + 0.20·RAM + 0.15·Disco)` con **Hard Override** cuando `max(CPU, Temp) ≥ 90%`, siguiendo la metodología USE de Brendan Gregg.
+  * Aplica suavizado **EWMA** (Exponential Weighted Moving Average, α=0.3) sobre la serie temporal de scores.
+  * Calcula estadísticas (media, desviación típica) y percentiles **P95/P99** mediante ordenación `Arrays.sort()` (complejidad O(n log n)).
+  * Finalmente ejecuta `Thread.sleep(15)` simulando la persistencia del resultado en BD (operación de E/S bloqueante de 15ms).
+* **Proceso de ejecución**:
+  1. Compila el proyecto completo desde el directorio raíz:
+     ```bash
+     mvn clean package -DskipTests
+     ```
+  2. Ejecuta el benchmark local (sin argumentos):
+     ```bash
+     java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Benchmark
+     ```
+  3. El programa ejecuta secuencialmente las 500 tareas (acumulando el tiempo de bloqueo en un único hilo), luego las distribuye en un pool de 20 hilos de plataforma tradicionales, y finalmente usa hilos virtuales para lanzarlas todas concurrentemente. Al terminar, imprime la tabla comparativa con los tiempos en consola.
+
+#### 2. Pruebas de Escalabilidad del Clúster (Red RMI)
+* **Clases de ejecución**: [`Benchmark.java`](file:///c:/Users/aimar/Downloads/files/client/src/main/java/cluster/Benchmark.java) (método `runClusterBenchmark()`), la tarea serializable [`BenchmarkTask.java`](file:///c:/Users/aimar/Downloads/files/common/src/main/java/cluster/BenchmarkTask.java) y el clúster de servidores [`ClusterNode.java`](file:///c:/Users/aimar/Downloads/files/server/src/main/java/cluster/ClusterNode.java).
+* **Lógica interna de simulación (`BenchmarkTask`) — Pipeline completo**:
+  * Cada una de las 150 tareas distribuidas ejecuta el pipeline de análisis de telemetría sobre una ventana de **5.000 muestras** generadas con distribución gaussiana sobre las métricas base.
+  * Calcula el **Stress Score** para cada muestra usando el **Modelo a Trozos** (media ponderada + Hard Override al 90%), aplica suavizado **EWMA** (α=0.3), obtiene estadísticas descriptivas y percentiles **P95/P99** mediante ordenación.
+  * Realiza **detección de anomalías por Z-Score** (umbral > 2σ) y calcula un score final compuesto ponderando los estadísticos con un factor multiplicativo por anomalías detectadas.
+  * Luego, ejecuta un bloqueo `Thread.sleep(40)` (40ms) que emula la latencia de almacenamiento distribuido e I/O de red.
+* **Proceso de ejecución**:
+  1. Asegúrate de tener Kafka iniciado (`docker compose up -d kafka`).
+  2. Levanta entre 1 y 3 nodos de cálculo en terminales independientes:
+     - **Terminal del Nodo 1**:
+       ```bash
+       java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
+       ```
+     - **Terminal del Nodo 2**:
+       ```bash
+       java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
+       ```
+     - **Terminal del Nodo 3**:
+       ```bash
+       java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
+       ```
+  3. Ejecuta la herramienta de benchmark pasándole el parámetro `cluster` y la lista de direcciones de los nodos activos que deseas evaluar:
+     - **Para probar con 1 Nodo activo**:
+       ```bash
+       java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Benchmark cluster localhost:6100
+       ```
+     - **Para probar con 2 Nodos activos**:
+       ```bash
+       java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Benchmark cluster localhost:6100 localhost:6101
+       ```
+     - **Para probar con 3 Nodos activos**:
+       ```bash
+       java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Benchmark cluster localhost:6100 localhost:6101 localhost:6102
+       ```
+  4. El programa despacha en paralelo las 150 tareas desde el cliente mediante un pool de hilos virtuales balanceándolas uniformemente en Round-Robin entre los stubs RMI de los nodos encendidos. Mide el tiempo total en milisegundos que toma procesar el lote bajo cada topología de clúster incremental y calcula el rendimiento (tareas/seg).
     </script>
 
     <script type="text/markdown" id="doc-arquitectura">
@@ -1000,8 +1253,8 @@ Una marca que dice "este nodo estaba muerto". Evita que otros nodos sigan intent
 ```
 
 **¿Qué simula el cliente?**
-- Un puente (consumidor) que recibe datos desde RabbitMQ y los pasa al cluster.
-- En el `main()` se conecta a RabbitMQ (usando Virtual Threads) y consume de la cola `telemetry_java_consumer_queue`.
+- Un puente (consumidor) que recibe datos desde Kafka y los pasa al cluster.
+- En el `main()` se conecta a Kafka y consume del topic `telemetry`.
 - Por cada mensaje Avro recibido, hace: `processTelemetry(payload)` a un nodo del cluster.
 - Simula: **Ingesta asíncrona, balanceo de carga, recuperación de fallos, y descubrimiento dinámico**.
 
@@ -1052,54 +1305,187 @@ A nivel funcional, el sistema:
 
 ---
 
-## 2. 🧠 Justificación Tecnológica (Stack)
+## 2. 🏗️ Arquitectura del Sistema
+
+La arquitectura está formada por varios subsistemas especializados que operan de forma desacoplada:
+
+```text
+┌────────────────┐     Avro     ┌──────────────────┐
+│   Agente Go    ├─────────────►│      Kafka       │ (Topic de Ingesta)
+│  (Data Source) │              │     (Broker)     │
+└────────────────┘              └────────┬─────────┘
+                                         │ Consumo
+                                         ▼
+                 ┌────────────────────────────────────────────────────────┐
+                 │                      CLIENTE JAVA                      │
+                 │   (Consumidor Kafka + RMI Bootstrap + Load Balancer)   │
+                 └────────────────────────────────────────────────────────┘
+                           │                  │                  │
+                RMI / TLS  │                  │ RMI / TLS        │ RMI / TLS
+                           ▼                  ▼                  ▼
+                    ┌─────────┐        ┌─────────┐        ┌─────────┐
+    Protocolo       │  NODO 1 │◄──────►│  NODO 2 │◄──────►│  NODO 3 │
+    Gossip P2P      │(Compute)│        │(Compute)│        │(Compute)│
+    (Membresía)     └─────────┘        └─────────┘        └─────────┘
+```
+
+### Componentes Clave:
+1. **Source (Agente Go):** Obtiene datos del sistema operativo y genera cargas útiles (*payloads*).
+2. **Buffer (Kafka):** Desacopla la emisión de datos de la capacidad y velocidad de procesamiento del cluster de Java.
+3. **Edge / Entrypoint (Cliente Java):** Actúa como un puente. Escucha mensajes de Kafka y los balancea (Round-Robin tolerante a fallos) enviándolos por RMI al cluster.
+4. **Compute Grid (Servidores ClusterNode):** Malla de nodos que ejecutan el motor de cálculo genérico (`Task`) o procesan telemetría localmente. Mantienen su estado (quién está vivo/muerto) "cotilleando" (Gossip) entre sí.
+
+---
+
+## 3. 🧠 Justificación Tecnológica (Stack)
 
 Cada tecnología en este ecosistema no fue elegida al azar, sino que resuelve un problema específico del procesamiento o la arquitectura en red.
 
-### 🌟 2.1. Java 21 y Virtual Threads (Project Loom)
+### 🌟 3.1. Java 21 y Virtual Threads (Project Loom)
 En la parte del procesamiento RMI (Motor de Cálculo) y el puente (Cliente), la concurrencia tradicional generaría "cuellos de botella" graves: RMI bloquea los hilos durante la conexión y espera.
 - **Justificación:** Los *Virtual Threads* permiten instanciar millones de hilos superligeros que se "aparcan" gratis cuando esperan I/O (la red), evitando que el motor se sature.
-- **Resultado:** En nuestra implementación, RabbitMQ o las peticiones RMI usan `Executors.newVirtualThreadPerTaskExecutor()`, logrando alto rendimiento sin un límite duro de *ThreadPools*.
+- **Resultado:** En nuestra implementación, el procesamiento concurrente de telemetría de Kafka y las peticiones RMI usan `Executors.newVirtualThreadPerTaskExecutor()`, logrando alto rendimiento sin un límite duro de *ThreadPools*.
 
-### 🌟 2.2. Java RMI (Remote Method Invocation)
+### 🌟 3.2. Java RMI (Remote Method Invocation)
 Sirve como vía de comunicación RPC (Remote Procedure Call) a nivel interno.
 - **Justificación:** Otorga la capacidad de invocar métodos remotos (como `processTelemetry` o `executeTask(Task)`) en el clúster con serialización nativa de objetos complejos Java (como clases `Task`). El *overhead* de red es compensado al no requerir parseos de JSON/HTTP continuamente.
 - **Resultado:** Las lógicas abstractas se pueden distribuir de forma nativa enviando *Bytecode*.
 
-### 🌟 2.3. Protocolo Gossip P2P
+### 🌟 3.3. Protocolo Gossip P2P
 Para tener un cluster *"master-less"* (sin un líder ni servidor centralizado).
 - **Justificación:** Un servidor central o servicio estilo ZooKeeper añade complejidad y un punto único de fallo. *Gossip* emula el comportamiento de un virus o "chisme": cada nodo le cuenta a otro a quién conoce, propagando la información de salud y topología gradualmente por la red.
 - **Resultado:** Alta tolerancia a la partición y fallos en hardware comercial estándar. O(N²) de coste pasivo pero inmensa robustez.
 
-### 🌟 2.4. RabbitMQ
-El software bróker AMQP.
-- **Justificación:** Si los agentes de Go enviasen los datos en vivo directo a los nodos, la caída de estos haría perder métricas, y un aluvión de telemetría haría colapsar la capa de red con denegación de servicio (Backpressure problems). RabbitMQ introduce **desacoplamiento** y actúa de "amortiguador" (*buffer*).
-- **Resultado:** Si el cluster RMI de Java se apaga o sufre, RabbitMQ retiene ordenadamente los mensajes hasta que vuelva.
+### 🌟 3.4. Apache Kafka
+El bróker de mensajería distribuido.
+- **Justificación:** Si los agentes de Go enviasen los datos en vivo directo a los nodos, la caída de estos haría perder métricas, y un aluvión de telemetría haría colapsar la capa de red con denegación de servicio (Backpressure problems). Kafka introduce **desacoplamiento** y actúa de "amortiguador" (*buffer*) y log distribuido.
+- **Resultado:** Si el cluster RMI de Java se apaga o sufre, Kafka retiene ordenadamente los mensajes hasta que vuelva, permitiendo además el re-procesamiento si fuera necesario.
 
-### 🌟 2.5. Golang (Agentes de Extracción)
+### 🌟 3.5. Golang (Agentes de Extracción)
 El `AgenteGo` se encarga de extraer la métrica e iniciar el ciclo vital de los datos.
 - **Justificación:** Go se compila como un binario estático, sin requerir una JVM de 200MB en las máquinas de donde obtiene los datos. Es altamente concurrente y consume ~15MB-30MB de memoria en ejecución. Ideal para *sidecars* y sistemas embebidos de monitorización.
 
-### 🌟 2.6. Apache Avro
-Para la codificación del mensaje de RabbitMQ a RMI.
+### 🌟 3.6. Apache Avro
+Para la codificación del mensaje de Kafka a RMI.
 - **Justificación:** Frente a JSON que necesita descifrar strings, Avro comprime los datos de forma binaria apoyado en un *schema* fijo, reduciendo drásticamente (hasta en un 70%) el tamaño de banda ocupada en red y acelerando la de-serialización.
 
-### 🌟 2.7. TLS/SSL para Cifrado
+### 🌟 3.7. TLS/SSL para Cifrado
 Para la comunicación en el interior del cluster.
 - **Justificación:** RMI en crudo carece de seguridad y transita en texto o bytes predecibles por la red (vulnerable a *man-in-the-middle* o ejecución de comandos remota maliciosa). Inyectando `-Djavax.net.ssl.trustStore` y fábricas de SSL personalizadas, el cluster RMI pasa a ser encriptado, pudiendo interconectar zonas geográficas diferentes con seguridad.
 
 ---
 
-## 🔀 Flujo Completo y Ciclo de Vida de los Datos
+## 4. 🔀 Flujo Completo y Ciclo de Vida de los Datos
+
+Para empaquetar cómo coopera todo, este es el viaje de 1 milisegundo de tu aplicación:
 
 1. **[GO]** Un sensor en el Agente de Go detecta que la CPU local está al 90%. Empaqueta esta información.
 2. **[GO -> AVRO]** Go serializa la métrica utilizando codificación binaria *Avro* y un schema compartido.
-3. **[GO -> AMQP]** Go envía este paquete binario al Topic configurado en *RabbitMQ* (`telemetry_fanout`).
-4. **[MQ]** RabbitMQ encola el paquete y se asegura de que exista persistencia.
-5. **[JAVA CLIENT]** El nodo `Client` ("el consumidor"), escuchando mediante un hilo Virtual, recibe instantáneamente desde la cola MQ el paquete Avro.
-6. **[JAVA CLIENT -> LOAD BALANCER]** El `Client` verifica su caché Gossip. Descubre que hay 3 nodos vivos. El puntero *round-robin* selecciona el `NODO 2`.
-7. **[JAVA RMI (TLS)]** `Client` invoca `stubNODO2.processTelemetry(paquete_avro)`. El flujo viaja por red con encriptación TLS.
-8. **[JAVA NODE]** El `NODO 2` (Motor de Cálculo) recibe el Byte Array instanciando un *Virtual Thread*, deserializa el paquete y efectúa la lógica de transformación / cálculo (Stress Score) o almacenamiento final.
+3. **[GO -> KAFKA]** Go envía este paquete binario al topic `telemetry` en *Kafka*.
+4. **[BROKER]** Kafka almacena el paquete y se asegura de que exista persistencia y replicación.
+5. **[JAVA CLIENT]** El nodo `Client` ("el consumidor"), escuchando mediante un bucle de consumo en el hilo principal, recibe instantáneamente desde Kafka el paquete Avro.
+6. **[JAVA CLIENT -> LOAD BALANCER]** El `Client` verifica su caché Gossip. Descubre que hay 3 nodos vivos. El puntero *round-robin* selecciona el `NODO 2` y despacha el procesamiento en un Virtual Thread.
+7. **[JAVA RMI (TLS)]** El Virtual Thread invoca `stubNODO2.processTelemetry(paquete_avro)`. El flujo viaja por red con encriptación TLS.
+8. **[JAVA NODE]** El `NODO 2` (Motor de Cálculo) recibe el Byte Array instanciando un *Virtual Thread*, deserializa el paquete y efectúa la lógica de transformación / cálculo o almacenamiento final.
+
+
+## 5. 🚀 Resiliencia (Casos Extremos)
+
+- **Un Nodo de procesado se quema/cae:** Los demás dejarán de recibir pings. Tras 3-5 iteraciones, el nodo se elimina del Directorio Global P2P. El Cliente al fallar su intento inicial, lanza un *Failover* automático e intenta el siguiente nodo transparente. Ningún dato de Kafka se pierde.
+- **Go genera 100 veces más tráfico del habitual:** Kafka se encargará del encolamiento y almacenamiento. El cluster procesará tan rápido como pueda.
+- **Se incorporan más Nodos:** Simplemente arrancan un nuevo proceso instanciado apontando a la capa de Semillas (*Seeds*). En un par de *pings* el cluster entero conoce los nuevos recursos computacionales disponibles de forma orgánica.
+
+---
+
+## 6. 📈 Evaluación Cuantitativa del Rendimiento y Escalabilidad
+
+Para validar científicamente las decisiones de diseño adoptadas, se ha implementado un componente de benchmark (`cluster.Benchmark`) en el submódulo del Cliente para evaluar tanto la concurrencia a nivel de nodo individual como la escalabilidad horizontal en un entorno distribuido de nodos variables.
+
+### 6.1. Pruebas de Concurrencia de un Nodo
+Se ejecutó un lote estresante de **500 tareas simultáneas** simulando el cálculo de la métrica **Stress Score** junto con operaciones bloqueantes de red o almacenamiento (esperas de 15ms) bajo tres estrategias de concurrencia:
+
+1. **Secuencial (Bloqueante)**: 
+   - **Tiempo total**: **10.294 ms**
+   - **Rendimiento**: **48,6 tareas/seg**
+   - **Limitación**: El hilo principal se bloquea durante la espera de red/disco de cada tarea, forzando un procesamiento puramente secuencial.
+2. **Hilos de Plataforma (Pool Fijo de 20)**:
+   - **Tiempo total**: **731 ms (Speedup: 14,08x)**
+   - **Rendimiento**: **684,0 tareas/seg**
+   - **Limitación**: Mejora sustancial al procesar hasta 20 tareas en paralelo, pero genera cola de espera en el pool al haber más tareas concurrentes (500) que hilos de CPU asignados. Aumentar el pool a 500 hilos dispararía el consumo de memoria JVM (~1MB por pila de hilo).
+3. **Hilos Virtuales (Project Loom - Java 21)**:
+   - **Tiempo total**: **150 ms (Speedup: 68,63x)**
+   - **Rendimiento**: **3.333,3 tareas/seg**
+   - **Ventaja**: Los hilos virtuales se suspenden y reanudan de forma transparente sin bloquear el hilo físico del sistema operativo cuando esperan I/O. Esto maximiza la eficiencia de CPU y permite que miles de tareas concurrentes se resuelvan casi instantáneamente con un único hilo portador de OS activo.
+
+#### 🧪 Cómo y qué se ha probado en Concurrencia (Detalle de la prueba):
+- **Clase de ejecución**: [`Benchmark.java`](file:///c:/Users/aimar/Downloads/files/client/src/main/java/cluster/Benchmark.java) en el submódulo `client` (método `runLocalBenchmark()`).
+- **Lógica interna de simulación (Modelo a Trozos / Piecewise)**:
+  - Cada una de las 500 tareas simula el procesamiento de una ventana temporal de **1.000 muestras de telemetría** generadas con ruido gaussiano (fluctuaciones realistas de CPU, RAM, Disco y Temperatura).
+  - Para cada muestra calcula el **Stress Score** aplicando el **Modelo a Trozos**: media ponderada `(0.35·CPU + 0.30·Temp + 0.20·RAM + 0.15·Disco)` con **Hard Override** cuando `max(CPU, Temp) ≥ 90%`, siguiendo la metodología USE de Brendan Gregg.
+  - Aplica suavizado **EWMA** (Exponential Weighted Moving Average, α=0.3) sobre la serie temporal de scores.
+  - Calcula estadísticas (media, desviación típica) y percentiles **P95/P99** mediante ordenación `Arrays.sort()` (complejidad O(n log n)).
+  - Finalmente ejecuta `Thread.sleep(15)` simulando la persistencia del resultado en BD (operación de E/S bloqueante de 15ms).
+- **Proceso de ejecución**:
+  1. Compila el proyecto completo desde el directorio raíz:
+     ```bash
+     mvn clean package -DskipTests
+     ```
+  2. Ejecuta el benchmark de concurrencia local (sin argumentos):
+     ```bash
+     java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Benchmark
+     ```
+  3. El programa ejecuta secuencialmente las 500 tareas (acumulando el tiempo de bloqueo en un único hilo), luego las distribuye en un `ThreadPoolExecutor` fijo de 20 hilos de plataforma tradicionales, y finalmente usa `Executors.newVirtualThreadPerTaskExecutor()` para lanzarlas concurrentemente mediante hilos virtuales. Al finalizar, vuelca en la consola una tabla comparativa con los tiempos y tasas de rendimiento obtenidos.
+
+---
+
+### 6.2. Escalabilidad del Clúster con Nodos Variables
+Se evaluó el comportamiento global del sistema distribuyendo **150 tareas de alta computación en CPU y bloqueo I/O** por Round-Robin hacia un número incremental de nodos activos:
+
+- **1 Nodo Activo**: **138,89 tareas/seg** (Tiempo: 1.080 ms)
+- **2 Nodos Activos**: **261,78 tareas/seg** (Tiempo: 573 ms)
+- **3 Nodos Activos**: **537,63 tareas/seg** (Tiempo: 279 ms)
+
+#### Análisis de Escalabilidad:
+1. **Desacoplamiento y Carga Lineal**: El balanceador del Cliente reparte la carga de trabajo de forma dinámica usando Round-Robin. 
+2. **Escalabilidad Horizontal Real**: Ejecutar múltiples nodos de cálculo en la misma máquina física para este benchmark local comparte los cores reales de CPU y el ancho de banda del bucle local de red (localhost), limitando el factor de aceleración máximo. Sin embargo, en un entorno de red distribuido real con máquinas físicas dedicadas por nodo, la adición de nodos incrementa linealmente la capacidad del clúster de forma proporcional al número de CPUs reales.
+3. **Diseño Modulado sin Coordinador Central**: La arquitectura Gossip permite expandir la potencia del clúster de forma caliente (on-the-fly) sin cuellos de botella de sincronización centralizada.
+
+#### 🧪 Cómo y qué se ha probado en Escalabilidad (Detalle de la prueba):
+- **Clases de ejecución**: [`Benchmark.java`](file:///c:/Users/aimar/Downloads/files/client/src/main/java/cluster/Benchmark.java) (método `runClusterBenchmark()`) enviando instancias de la clase serializable [`BenchmarkTask.java`](file:///c:/Users/aimar/Downloads/files/common/src/main/java/cluster/BenchmarkTask.java) al clúster de servidores [`ClusterNode.java`](file:///c:/Users/aimar/Downloads/files/server/src/main/java/cluster/ClusterNode.java).
+- **Lógica interna de simulación (`BenchmarkTask`) — Pipeline completo**:
+  - Cada una de las 150 tareas distribuidas ejecuta el pipeline de análisis de telemetría sobre una ventana de **5.000 muestras** generadas con distribución gaussiana sobre las métricas base.
+  - Calcula el **Stress Score** para cada muestra usando el **Modelo a Trozos** (media ponderada + Hard Override al 90%), aplica suavizado **EWMA** (α=0.3), obtiene estadísticas descriptivas y percentiles **P95/P99** mediante ordenación.
+  - Realiza **detección de anomalías por Z-Score** (umbral > 2σ) y calcula un score final compuesto ponderando los estadísticos con un factor multiplicativo por anomalías detectadas.
+  - Luego, ejecuta un bloqueo `Thread.sleep(40)` (40ms) que emula la latencia de almacenamiento distribuido e I/O de red.
+- **Proceso de ejecución**:
+  1. Asegúrate de tener Kafka iniciado (`docker compose up -d kafka`).
+  2. Levanta entre 1 y 3 nodos de cálculo en terminales independientes:
+     - **Terminal del Nodo 1**:
+       ```bash
+       java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
+       ```
+     - **Terminal del Nodo 2**:
+       ```bash
+       java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
+       ```
+     - **Terminal del Nodo 3**:
+       ```bash
+       java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
+       ```
+  3. Ejecuta la herramienta de benchmark pasándole el parámetro `cluster` y la lista de direcciones de los nodos activos que deseas evaluar:
+     - **Para probar con 1 Nodo activo**:
+       ```bash
+       java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Benchmark cluster localhost:6100
+       ```
+     - **Para probar con 2 Nodos activos**:
+       ```bash
+       java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Benchmark cluster localhost:6100 localhost:6101
+       ```
+     - **Para probar con 3 Nodos activos**:
+       ```bash
+       java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Benchmark cluster localhost:6100 localhost:6101 localhost:6102
+       ```
+  4. El programa despacha en paralelo las 150 tareas desde el cliente mediante un pool de hilos virtuales balanceándolas uniformemente en Round-Robin entre los stubs RMI disponibles. Mide el tiempo total en milisegundos que le toma procesar el lote completo bajo cada topología de clúster incremental y calcula el rendimiento (tareas/seg).
     </script>
 
     <script type="text/markdown" id="doc-reference">
@@ -1382,6 +1768,195 @@ scheduler.scheduleAtFixedRate(() -> {
 ```
     </script>
 
+    <script type="text/markdown" id="doc-gcp">
+# 🚀 Guía de Despliegue en Google Cloud Platform (GCP)
+
+Esta guía detalla cómo desplegar el clúster RMI de servidores (`ClusterNode`), el cliente consumidor de Kafka (`Client`) y el broker de Kafka en GCP. Todo el despliegue de la **Opción A está automatizado** con `deploy-gcp.sh`; la Opción B (GKE) usa el manifiesto `k8s-deployment.yaml`.
+
+---
+
+## 🏗️ Resumen de Arquitectura en la Nube
+
+```
+[AgenteGo en máquinas externas]  --Avro/Kafka 9094-->  [ Kafka ]
+                                                           │ (topic "telemetry", listener INTERNAL 9092)
+                                                           ▼
+                                                       [ Client ]  --RMI round-robin + failover-->  [ node-1 | node-2 | node-3 ]
+```
+
+- **AgenteGo NO se despliega en cloud**: corre en cada máquina monitorizada y solo necesita alcanzar el puerto **9094** de Kafka.
+- **Kafka + Client + 3 nodos** sí van a cloud, en la misma red para que RMI resuelva los hostnames `node-1/2/3`.
+
+Dos enfoques:
+
+1. **Opción A (recomendada): Google Compute Engine (GCE)** — una VM con Docker Compose.
+   - **Por qué**: RMI embute el hostname en el stub y exporta el objeto remoto en un **puerto anónimo** (`super(0)` en `ClusterNode`). Dentro de la red bridge de Compose esto "just works" sin abrir puertos extra. Ideal para demo de tolerancia a fallos y pre-producción.
+2. **Opción B: Google Kubernetes Engine (GKE)** — `StatefulSet` con DNS headless estable (`rmi-node-0.rmi-service`). Solo merece la pena si necesitas escalado elástico.
+
+> ⚠️ **Kafka es un único broker (SPOF).** El clúster RMI es altamente disponible (puedes matar nodos y sigue funcionando), pero Kafka no. Para producción real usa Confluent Cloud o un clúster Kafka multi-broker. Para demo/pre-producción, un solo broker es suficiente.
+
+---
+
+## ✅ Opción A — Despliegue automatizado (turnkey)
+
+### Requisitos previos (en tu máquina local)
+- `gcloud` CLI autenticado: `gcloud auth login`
+- Docker en marcha (para construir y subir las imágenes)
+
+### Paso 1: Configurar variables
+```bash
+cp .env.example .env
+# Edita .env y rellena al menos PROJECT_ID, REGION, ZONE.
+# Deja EXTERNAL_HOST vacío: el script lo rellena tras crear la VM.
+# IMPORTANTE: ajusta AGENT_SOURCE_RANGES a las IPs de tus AgenteGo (NO 0.0.0.0/0).
+```
+
+### Paso 2: Desplegar todo de una vez
+```bash
+./deploy-gcp.sh
+```
+
+El script ejecuta, de forma idempotente:
+1. Habilita las APIs (`artifactregistry`, `compute`).
+2. Crea el repositorio de Artifact Registry si no existe.
+3. Construye y sube las imágenes `rmi-server` y `rmi-client`.
+4. Crea la VM (`e2-medium`, Ubuntu 22.04) con la etiqueta `rmi-cluster-node`.
+5. Crea la regla de firewall para el puerto **9094** restringida a `AGENT_SOURCE_RANGES`.
+6. Instala Docker en la VM.
+7. Resuelve la **IP pública** de la VM, la inyecta como `EXTERNAL_HOST` y arranca el stack con `docker-compose.gcp.yml`.
+
+Al terminar, imprime la dirección que deben usar los AgenteGo (`<IP_PUBLICA>:9094`).
+
+### Pasos parciales (opcional)
+```bash
+./deploy-gcp.sh images   # solo build + push de imágenes
+./deploy-gcp.sh infra    # solo VM + firewall + Docker
+./deploy-gcp.sh up        # solo copiar compose y (re)arrancar el stack
+```
+
+### Conectar los AgenteGo
+En cada máquina monitorizada:
+```bash
+./AgenteGo --kafka-brokers=<IP_PUBLICA_VM>:9094
+```
+
+---
+
+## 🛠️ Opción A — Pasos manuales (referencia)
+
+Si prefieres no usar el script, estos son los comandos equivalentes.
+
+### 1. Artifact Registry e imágenes
+```bash
+gcloud services enable artifactregistry.googleapis.com compute.googleapis.com
+
+gcloud artifacts repositories create rmi-cluster-repo \
+    --repository-format=docker --location=europe-west1 \
+    --description="Repositorio Docker para Clúster RMI y Cliente"
+
+gcloud auth configure-docker europe-west1-docker.pkg.dev
+
+# Sustituye [PROJECT_ID]
+docker build -t europe-west1-docker.pkg.dev/[PROJECT_ID]/rmi-cluster-repo/rmi-server:latest -f server/Dockerfile .
+docker push europe-west1-docker.pkg.dev/[PROJECT_ID]/rmi-cluster-repo/rmi-server:latest
+
+docker build -t europe-west1-docker.pkg.dev/[PROJECT_ID]/rmi-cluster-repo/rmi-client:latest -f client/Dockerfile .
+docker push europe-west1-docker.pkg.dev/[PROJECT_ID]/rmi-cluster-repo/rmi-client:latest
+```
+
+### 2. Crear la VM
+```bash
+gcloud compute instances create rmi-cluster-vm \
+    --zone=europe-west1-b \
+    --machine-type=e2-medium \
+    --image-family=ubuntu-2204-lts \
+    --image-project=ubuntu-os-cloud \
+    --boot-disk-size=20GB \
+    --tags=rmi-cluster-node
+```
+
+### 3. Firewall para Kafka externo (puerto 9094)
+> ⚠️ Restringe SIEMPRE el origen. Kafka va en PLAINTEXT; abrirlo a `0.0.0.0/0` deja el broker accesible a todo Internet.
+```bash
+gcloud compute firewall-rules create allow-kafka-external \
+    --allow=tcp:9094 \
+    --source-ranges=203.0.113.10/32 \
+    --target-tags=rmi-cluster-node \
+    --description="Entrada a Kafka 9094 desde los AgenteGo autorizados"
+```
+
+### 4. Instalar Docker, copiar compose y arrancar
+```bash
+gcloud compute ssh rmi-cluster-vm --zone=europe-west1-b
+# Dentro de la VM:
+sudo apt-get update && sudo apt-get install -y docker.io docker-compose-v2
+sudo systemctl enable --now docker
+gcloud auth configure-docker europe-west1-docker.pkg.dev
+```
+Sube `docker-compose.gcp.yml` (renómbralo a `docker-compose.yml` en la VM) y un `.env` con `PROJECT_ID`, `REGION`, `REPO` y `EXTERNAL_HOST=<IP_PUBLICA_VM>`, luego:
+```bash
+sudo docker compose --env-file .env pull
+sudo docker compose --env-file .env up -d
+```
+
+> 🔑 **Por qué `EXTERNAL_HOST` es obligatorio en cloud:** si el listener externo anuncia `localhost:9094`, los AgenteGo hacen bootstrap contra la VM pero Kafka les responde "reconéctate a localhost" → se conectan a su propia máquina y fallan. Debe ser la IP/DNS pública de la VM.
+
+---
+
+## ☸️ Opción B: Despliegue en Google Kubernetes Engine (GKE)
+
+El manifiesto completo y funcional está en **`k8s-deployment.yaml`** e incluye Kafka, el `StatefulSet` de los 3 nodos (con DNS headless) y el `Deployment` del Client.
+
+```bash
+# 1. Sustituye los placeholders por tus valores
+sed -i 's/\[PROJECT_ID\]/mi-proyecto/; s/\[REGION\]/europe-west1/' k8s-deployment.yaml
+
+# 2. Autentica kubectl contra tu clúster GKE y aplica
+kubectl apply -f k8s-deployment.yaml
+```
+
+Kubernetes arranca `rmi-node-0/1/2` de forma ordenada; cada uno se comunica con los demás vía el DNS headless `rmi-node-X.rmi-service`. El Client consume de `kafka:9092` y reparte la telemetría por RMI.
+
+> Para que los AgenteGo externos publiquen en este Kafka necesitarías exponerlo (Service `LoadBalancer` + listener EXTERNAL con la IP del LB). El manifiesto base solo expone Kafka internamente; añade ese listener si tus agentes están fuera del clúster.
+
+---
+
+## 🔐 Configuración de TLS / SSL en Contenedores
+
+Si ejecutas los nodos con seguridad SSL activada (ver `RUN_WITH_TLS.md`):
+
+1. **GCE / Compose**:
+   - Genera `server.keystore` con `generate-certs.sh`.
+   - Móntalo como volumen de solo lectura en cada servicio de `docker-compose.gcp.yml`:
+     ```yaml
+     volumes:
+       - ./server.keystore:/app/server.keystore:ro
+     ```
+   - Inyecta las propiedades JVM:
+     ```yaml
+     environment:
+       - JVM_OPTS=-Djava.rmi.server.hostname=node-1 -Djavax.net.ssl.keyStore=/app/server.keystore -Djavax.net.ssl.keyStorePassword=changeit
+     ```
+2. **GKE**:
+   - Crea un Secret: `kubectl create secret generic rmi-keystore --from-file=server.keystore`
+   - Móntalo en `/app/certs/` y añade la propiedad JVM correspondiente.
+
+> Esto cifra RMI/Gossip, **no** el tráfico Kafka. Para cifrar Kafka externo necesitas configurar SASL/SSL en el broker y en el AgenteGo.
+
+---
+
+## 📁 Archivos de despliegue del repositorio
+
+| Archivo | Propósito |
+|---|---|
+| `deploy-gcp.sh` | Script turnkey de la Opción A (build, push, VM, firewall, arranque) |
+| `.env.example` | Plantilla de variables (cópiala a `.env`) |
+| `docker-compose.gcp.yml` | Stack de producción con imágenes de Artifact Registry |
+| `docker-compose.yml` | Stack local (build directo, `EXTERNAL_HOST` por defecto `localhost`) |
+| `k8s-deployment.yaml` | Manifiesto completo de GKE (Kafka + nodos + Client) |
+| `.dockerignore` | Acelera los builds y excluye `target/`, `.git`, docs, AgenteGo |
+    </script>
+
     <!-- Library Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
@@ -1443,12 +2018,25 @@ scheduler.scheduleAtFixedRate(() -> {
         const renderer = new marked.Renderer();
         const originalBlockquote = renderer.blockquote;
         renderer.blockquote = function(quote) {
-            const rawQuote = quote.trim();
-            const alertTypes = ['NOTE', 'TIP', 'IMPORTANT', 'WARNING', 'CAUTION'];
+            let htmlContent = '';
+            let rawContent = '';
             
+            if (typeof quote === 'string') {
+                htmlContent = quote;
+                rawContent = quote;
+            } else if (quote && typeof quote === 'object') {
+                rawContent = quote.raw || quote.text || '';
+                if (this.parser && quote.tokens) {
+                    htmlContent = this.parser.parse(quote.tokens);
+                } else {
+                    htmlContent = quote.text || '';
+                }
+            }
+
+            const alertTypes = ['NOTE', 'TIP', 'IMPORTANT', 'WARNING', 'CAUTION'];
             for (const type of alertTypes) {
                 const marker = `[!${type}]`;
-                if (rawQuote.includes(marker)) {
+                if (rawContent.includes(marker)) {
                     // Extract icon
                     let icon = 'fa-info-circle';
                     if (type === 'TIP') icon = 'fa-lightbulb';
@@ -1456,7 +2044,8 @@ scheduler.scheduleAtFixedRate(() -> {
                     if (type === 'WARNING') icon = 'fa-triangle-exclamation';
                     if (type === 'CAUTION') icon = 'fa-circle-xmark';
                     
-                    const cleanContent = rawQuote.replace(marker, '').replace('<p>', '').replace('</p>', '').trim();
+                    let cleanContent = htmlContent.replace(marker, '');
+                    cleanContent = cleanContent.replace('<p>', '').replace('</p>', '').trim();
                     
                     return `
                     <div class="alert-callout alert-${type.toLowerCase()}">

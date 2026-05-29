@@ -6,7 +6,7 @@ toolchain go1.24.13
 
 require (
 	github.com/hamba/avro/v2 v2.31.0
-	github.com/rabbitmq/amqp091-go v1.11.0
+	github.com/segmentio/kafka-go v0.4.47
 	github.com/shirou/gopsutil/v3 v3.24.5
 )
 

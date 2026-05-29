@@ -1,0 +1,20 @@
+# Build artifacts (se regeneran dentro de la imagen multi-stage)
+**/target/
+build/
+*.class
+
+# Git y metadatos de IDE
+.git/
+.gitignore
+.vscode/
+.devcontainer/
+
+# Documentación (no necesaria en el contexto de build)
+*.md
+
+# Agente Go (se compila y despliega aparte, no entra en las imágenes Java)
+AgenteGo-main/
+
+# Certificados y entornos (se montan/inyectan en runtime, no se hornean)
+*.keystore
+.env

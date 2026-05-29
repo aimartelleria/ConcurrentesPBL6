@@ -1,0 +1,129 @@
+# =====================================================================
+# Opción B: Despliegue en Google Kubernetes Engine (GKE).
+# Sustituye [PROJECT_ID] y [REGION] por tus valores antes de aplicar:
+#   sed -i 's/\[PROJECT_ID\]/mi-proyecto/; s/\[REGION\]/europe-west1/' k8s-deployment.yaml
+#   kubectl apply -f k8s-deployment.yaml
+# =====================================================================
+
+# ---------- Kafka (broker único, KRaft) ----------
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+spec:
+  selector:
+    app: kafka
+  ports:
+    - port: 9092
+      name: internal
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+        - name: kafka
+          image: bitnami/kafka:3.7.0
+          ports:
+            - containerPort: 9092
+          env:
+            - name: KAFKA_CFG_NODE_ID
+              value: "1"
+            - name: KAFKA_CFG_PROCESS_ROLES
+              value: "controller,broker"
+            - name: KAFKA_CFG_CONTROLLER_QUORUM_VOTERS
+              value: "1@localhost:9093"
+            - name: KAFKA_CFG_LISTENERS
+              value: "INTERNAL://:9092,CONTROLLER://:9093"
+            - name: KAFKA_CFG_ADVERTISED_LISTENERS
+              value: "INTERNAL://kafka:9092"
+            - name: KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
+            - name: KAFKA_CFG_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_CFG_INTER_BROKER_LISTENER_NAME
+              value: "INTERNAL"
+---
+# ---------- Clúster RMI (StatefulSet con DNS estable) ----------
+apiVersion: v1
+kind: Service
+metadata:
+  name: rmi-service
+  labels:
+    app: rmi-server
+spec:
+  ports:
+    - port: 6100
+      name: rmi
+  clusterIP: None  # Headless: indispensable para el DNS por pod del StatefulSet
+  selector:
+    app: rmi-server
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rmi-node
+spec:
+  serviceName: "rmi-service"
+  replicas: 3
+  selector:
+    matchLabels:
+      app: rmi-server
+  template:
+    metadata:
+      labels:
+        app: rmi-server
+    spec:
+      containers:
+        - name: rmi-server
+          image: "[REGION]-docker.pkg.dev/[PROJECT_ID]/rmi-cluster-repo/rmi-server:latest"
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name        # rmi-node-0, rmi-node-1, rmi-node-2
+            - name: HOST
+              value: "$(NODE_ID).rmi-service"      # DNS interno headless
+            - name: PORT
+              value: "6100"
+            - name: SEEDS
+              value: "rmi-node-0.rmi-service:6100 rmi-node-1.rmi-service:6100 rmi-node-2.rmi-service:6100"
+            - name: JVM_OPTS
+              value: "-Djava.rmi.server.hostname=$(NODE_ID).rmi-service"
+          ports:
+            - containerPort: 6100
+              name: rmi
+---
+# ---------- Client (consumidor Kafka + emisor RMI) ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rmi-client
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rmi-client
+  template:
+    metadata:
+      labels:
+        app: rmi-client
+    spec:
+      containers:
+        - name: rmi-client
+          image: "[REGION]-docker.pkg.dev/[PROJECT_ID]/rmi-cluster-repo/rmi-client:latest"
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka:9092"
+            - name: SEEDS
+              value: "rmi-node-0.rmi-service:6100 rmi-node-1.rmi-service:6100 rmi-node-2.rmi-service:6100"

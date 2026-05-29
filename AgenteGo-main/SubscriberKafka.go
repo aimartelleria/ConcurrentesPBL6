@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/hamba/avro/v2"
-	"github.com/rabbitmq/amqp091-go"
+	"github.com/segmentio/kafka-go"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
@@ -85,7 +85,7 @@ func getTemperatureViaPowerShell() *float64 {
 	return nil
 }
 
-func sendMetrics(rabbitURL string) {
+func sendMetrics(kafkaBrokers string) {
 	// 1. Recolección de datos
 	c, err := cpu.Percent(time.Second, false)
 	if err != nil {
@@ -113,7 +113,6 @@ func sendMetrics(rabbitURL string) {
 		return
 	}
 
-	// Nota: La temperatura depende mucho del OS y hardware
 	currentTemp := getTemperature()
 
 	payload := Metrics{
@@ -136,97 +135,56 @@ func sendMetrics(rabbitURL string) {
 		return
 	}
 
-	// 2. Envío a RabbitMQ (se abre y cierra conexión para evitar "timeouts" por conexión inactiva en 5 min)
-	conn, err := amqp091.Dial(rabbitURL)
-	if err != nil {
-		log.Printf("Error conectando a RabbitMQ: %v", err)
-		return
+	// 2. Envío a Kafka
+	w := &kafka.Writer{
+		Addr:     kafka.TCP(kafkaBrokers),
+		Topic:    "telemetry",
+		Balancer: &kafka.LeastBytes{},
 	}
-	defer conn.Close()
-
-	ch, err := conn.Channel()
-	if err != nil {
-		log.Printf("Error abriendo canal: %v", err)
-		return
-	}
-	defer ch.Close()
-
-	// Declare exchange to align with Java Client's consumer
-	err = ch.ExchangeDeclare(
-		"telemetry_fanout", // name
-		"fanout",           // type
-		true,               // durable
-		false,              // auto-deleted
-		false,              // internal
-		false,              // no-wait
-		nil,                // arguments
-	)
-	if err != nil {
-		log.Printf("Error declarando exchange: %v", err)
-		return
-	}
-
-	// Declare the queue
-	q, err := ch.QueueDeclare("it_metrics", false, false, false, false, nil)
-	if err != nil {
-		log.Printf("Error declarando cola: %v", err)
-		return
-	}
-
-	// Bind queue to exchange so Go consumer can read from it too
-	err = ch.QueueBind(
-		q.Name,             // queue name
-		"",                 // routing key
-		"telemetry_fanout", // exchange
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Printf("Error vinculando cola al exchange: %v", err)
-		return
-	}
+	defer w.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err = ch.PublishWithContext(ctx, "telemetry_fanout", "", false, false, amqp091.Publishing{
-		ContentType: "application/avro",
-		Body:        body,
-	})
+	err = w.WriteMessages(ctx,
+		kafka.Message{
+			Value: body,
+		},
+	)
 
 	if err != nil {
-		log.Printf("Error al enviar mensaje a RabbitMQ: %v", err)
+		log.Printf("Error al enviar mensaje a Kafka: %v", err)
 	} else {
-		fmt.Printf("[%s] datos binarios enviados correctamente por RabbitMQ\n", time.Now().Format("2006-01-02 15:04:05"))
+		fmt.Printf("[%s] datos binarios enviados correctamente por Kafka\n", time.Now().Format("2006-01-02 15:04:05"))
 	}
 }
 
-func runPublisher(rabbitMQURL string) {
+func runPublisher(kafkaBrokers string) {
 	fmt.Println("Iniciando servicio de recolección métricas en segundo plano...")
-	fmt.Println("Se enviarán métricas a RabbitMQ cada 5 minutos.")
+	fmt.Println("Se enviarán métricas a Kafka cada 5 minutos.")
 	fmt.Println("Para detener el servicio, mata o finaliza el proceso desde el 'Administrador de Tareas'.")
 
 	// Enviar primer lote de métricas de inmediato
-	sendMetrics(rabbitMQURL)
+	sendMetrics(kafkaBrokers)
 
 	// Crear ticker para intervalos de 5 minutos
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
-	// Ciclo 'infinito' bloqueante (el proceso principal nunca terminará a menos que se mate)
+	// Ciclo 'infinito' bloqueante
 	for range ticker.C {
-		sendMetrics(rabbitMQURL)
+		sendMetrics(kafkaBrokers)
 	}
 }
 
 func main() {
 	mode := flag.String("mode", "publisher", "Mode to run: 'publisher' or 'consumer'")
-	rabbitMQURL := flag.String("rabbitmq-url", "amqp://guest:guest@localhost:5672/", "RabbitMQ connection URL")
+	kafkaBrokers := flag.String("kafka-brokers", "localhost:9094", "Kafka brokers comma-separated list")
 	flag.Parse()
 
 	if *mode == "consumer" {
-		runConsumer(*rabbitMQURL)
+		runConsumer(*kafkaBrokers)
 	} else {
-		runPublisher(*rabbitMQURL)
+		runPublisher(*kafkaBrokers)
 	}
 }
