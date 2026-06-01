@@ -1,13 +1,28 @@
 package cluster;
 
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.CqlSessionBuilder;
+import com.datastax.oss.driver.api.core.cql.BoundStatementBuilder;
+import com.datastax.oss.driver.api.core.cql.PreparedStatement;
+
+import org.apache.avro.generic.GenericRecord;
 import org.apache.kafka.clients.consumer.CommitFailedException;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -17,22 +32,27 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.util.Collections;
-import java.util.Properties;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 
 /**
- * Cluster-aware client. No single point of failure on the lookup path.
+ * Servicio puente Kafka -> RMI -> Cassandra (entregable desplegable).
  *
- *  - Configured with a list of seed addresses. As long as ONE is reachable,
- *    bootstrap succeeds; the rest are tried on failure.
- *  - Once bootstrapped, caches the full member list and round-robins.
- *  - On a call failure, tries the next member; if every cached member
- *    fails, refreshes the view from any reachable seed and tries once more.
+ * Flujo por mensaje:
+ *   1. Consume telemetría Avro de Kafka deserializada vía Confluent Schema Registry.
+ *   2. Calcula el StressScore en el clúster Java por RMI (round-robin + failover).
+ *   3. Persiste la fila enriquecida en Cassandra (webhardmon.mediciones).
+ *
+ * Garantías: ack manual (commit tras procesar el lote) + dead-letter topic para
+ * los mensajes no procesables (semántica at-least-once).
+ *
+ * Configuración por variables de entorno (sin valores hardcodeados de red):
+ *   KAFKA_BOOTSTRAP_SERVERS   (def. localhost:9094)
+ *   SCHEMA_REGISTRY_URL       (def. http://localhost:8085)
+ *   TELEMETRY_TOPIC           (def. telemetry)
+ *   CONSUMER_GROUP            (def. telemetry_java_consumers)
+ *   CASSANDRA_CONTACT_POINTS  (def. localhost:9042  — coma-separado host:port)
+ *   CASSANDRA_LOCAL_DC        (def. datacenter1)
+ *   CASSANDRA_KEYSPACE        (def. webhardmon)
+ * Los seeds RMI se pasan como argumentos: Client <seedHost:Port> [seedHost:Port ...]
  */
 public class Client {
 
@@ -49,7 +69,6 @@ public class Client {
 
     /** Pulls the current member list from the first reachable seed/known-member. */
     private synchronized void refresh() throws Exception {
-        // Try last-known members first (likely warmer), then fall back to seeds.
         List<Endpoint> tryOrder = new ArrayList<>(members);
         for (Endpoint s : seeds) if (!tryOrder.contains(s)) tryOrder.add(s);
 
@@ -66,14 +85,13 @@ public class Client {
                 return;
             } catch (Exception ex) {
                 last = ex;
-                System.err.println("  bootstrap via " + e + " failed: "
-                        + ex.getClass().getSimpleName());
+                System.err.println("  bootstrap via " + e + " failed: " + ex.getClass().getSimpleName());
             }
         }
         throw new RuntimeException("Could not contact any seed or known member", last);
     }
 
-    /** Runs a executeTask() call with cross-node failover. */
+    /** Ejecuta una Task en el clúster con failover entre nodos (round-robin). */
     public <T> T executeTask(Task<T> task) throws Exception {
         if (members.isEmpty()) refresh();
 
@@ -82,61 +100,24 @@ public class Client {
             if (snap.isEmpty()) { refresh(); continue; }
 
             int start = Math.floorMod(cursor.getAndIncrement(), snap.size());
-
             for (int i = 0; i < snap.size(); i++) {
                 Endpoint e = snap.get((start + i) % snap.size());
                 try {
                     Registry reg = LocateRegistry.getRegistry(e.host, e.port);
                     ComputeService stub = (ComputeService) reg.lookup(SERVICE_NAME);
-                    System.out.println("-> dispatching task to " + e);
                     return stub.executeTask(task);
                 } catch (Exception ex) {
-                    System.err.println("   " + e + " failed ("
-                            + ex.getClass().getSimpleName() + "), trying next...");
+                    System.err.println("   " + e + " failed (" + ex.getClass().getSimpleName() + "), trying next...");
                 }
             }
-            // Every cached member failed — view is stale. Refresh and retry once.
             System.err.println("   all cached members failed, refreshing view");
-            try { refresh(); } catch (Exception refreshErr) { throw refreshErr; }
+            refresh();
         }
         throw new RuntimeException("All members failed even after a refresh");
     }
 
-    /** Runs the Avro payload over RMI using cross-node load balancing */
-    public void processTelemetry(byte[] payload) throws Exception {
-        if (members.isEmpty()) refresh();
+    // ------------------------------------------------------------------------
 
-        for (int attempt = 0; attempt < 2; attempt++) {
-            List<Endpoint> snap = members;
-            if (snap.isEmpty()) { refresh(); continue; }
-
-            int start = Math.floorMod(cursor.getAndIncrement(), snap.size());
-
-            for (int i = 0; i < snap.size(); i++) {
-                Endpoint e = snap.get((start + i) % snap.size());
-                try {
-                    Registry reg = LocateRegistry.getRegistry(e.host, e.port);
-                    ComputeService stub = (ComputeService) reg.lookup(SERVICE_NAME);
-                    System.out.println("-> dispatching telemetry to " + e);
-                    stub.processTelemetry(payload);
-                    return;
-                } catch (Exception ex) {
-                    System.err.println("   " + e + " failed ("
-                            + ex.getClass().getSimpleName() + "), trying next...");
-                }
-            }
-            System.err.println("   all cached members failed, refreshing view");
-            try { refresh(); } catch (Exception refreshErr) { throw refreshErr; }
-        }
-        throw new RuntimeException("All members failed even after a refresh");
-    }
-
-    /**
-     * Supports TLS/SSL via JVM properties:
-     *   -Djavax.net.ssl.trustStore=server.keystore
-     *   -Djavax.net.ssl.trustStorePassword=changeit
-     * See RUN_WITH_TLS.md for setup instructions.
-     */
     public static void main(String[] args) throws Exception {
         if (args.length < 1) {
             System.err.println("Usage: Client <seedHost:Port> [seedHost:Port ...]");
@@ -148,71 +129,85 @@ public class Client {
         Client client = new Client(seeds);
         try { client.refresh(); } catch (Exception ignore) {}
 
-        // Kafka Consumer configuration (act as consumer, simulating the ingest layer)
+        // --- Configuración por entorno ---
+        String kafkaBrokers = env("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094");
+        String srUrl        = env("SCHEMA_REGISTRY_URL",     "http://localhost:8085");
+        String topic        = env("TELEMETRY_TOPIC",         "telemetry");
+        String group        = env("CONSUMER_GROUP",          "telemetry_java_consumers");
+        String cassPoints   = env("CASSANDRA_CONTACT_POINTS","localhost:9042");
+        String cassDc       = env("CASSANDRA_LOCAL_DC",      "datacenter1");
+        String cassKeyspace = env("CASSANDRA_KEYSPACE",      "webhardmon");
+        final String DLQ_TOPIC = topic + ".DLT";
+
+        // --- Consumidor Kafka con deserializador Avro de Schema Registry ---
         Properties props = new Properties();
-        String kafkaBrokers = System.getenv("KAFKA_BOOTSTRAP_SERVERS");
-        if (kafkaBrokers == null || kafkaBrokers.isEmpty()) {
-            kafkaBrokers = "localhost:9094";
-        }
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaBrokers);
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, "telemetry_java_consumers");
-        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArrayDeserializer");
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, group);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,
+                "org.apache.kafka.common.serialization.StringDeserializer");
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG,
+                "io.confluent.kafka.serializers.KafkaAvroDeserializer");
+        props.put("schema.registry.url", srUrl);
+        props.put("specific.avro.reader", "false"); // GenericRecord, no clases generadas
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
-        // ── ACK MANUAL ──────────────────────────────────────────────────────────
-        // Desactivamos el commit automático de offsets. Solo confirmaremos (commitSync)
-        // el avance del consumidor DESPUÉS de haber procesado el lote o de haberlo
-        // aparcado en la dead-letter. Garantía "at-least-once": si la app cae antes
-        // del commit, Kafka reentrega el lote en el próximo arranque.
+        // ACK MANUAL: el offset solo se confirma tras procesar/aparcar todo el lote.
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
 
-        // ── DEAD-LETTER ─────────────────────────────────────────────────────────
-        // Productor hacia el "Dead-Letter Topic": ahí enviamos los mensajes que no se
-        // pueden procesar (p. ej. el clúster RMI no responde) para no bloquear ni
-        // perder datos. acks=all => esperamos confirmación del broker (fiabilidad).
-        final String DLQ_TOPIC = "telemetry.DLT";
+        // --- Productor de la dead-letter ---
         Properties dlqProps = new Properties();
         dlqProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaBrokers);
-        dlqProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
-        dlqProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArraySerializer");
+        dlqProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
+                "org.apache.kafka.common.serialization.StringSerializer");
+        dlqProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
+                "org.apache.kafka.common.serialization.ByteArraySerializer");
         dlqProps.put(ProducerConfig.ACKS_CONFIG, "all");
 
-        System.out.println(" [*] Consumer started. Waiting for Avro telemetry. To exit press CTRL+C");
+        // --- Sesión Cassandra + sentencia preparada ---
+        CqlSessionBuilder cb = CqlSession.builder()
+                .withKeyspace(cassKeyspace)
+                .withLocalDatacenter(cassDc);
+        for (String hp : cassPoints.split(",")) {
+            String h = hp.trim();
+            if (h.isEmpty()) continue;
+            int idx = h.lastIndexOf(':');
+            String host = idx > 0 ? h.substring(0, idx) : h;
+            int port    = idx > 0 ? Integer.parseInt(h.substring(idx + 1)) : 9042;
+            cb.addContactPoint(new InetSocketAddress(host, port));
+        }
+
+        System.out.printf(" [*] Bridge iniciado. Kafka=%s SR=%s topic=%s Cassandra=%s/%s%n",
+                kafkaBrokers, srUrl, topic, cassPoints, cassKeyspace);
 
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
-        try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props);
+        try (CqlSession session = cb.build();
+             KafkaConsumer<String, GenericRecord> consumer = new KafkaConsumer<>(props);
              KafkaProducer<String, byte[]> dlqProducer = new KafkaProducer<>(dlqProps)) {
-            consumer.subscribe(Collections.singletonList("telemetry"));
+
+            PreparedStatement insert = session.prepare(
+                "INSERT INTO mediciones (empresa_id, nombre, ts, cpu_percent, ram_percent, " +
+                "disco_percent, temperatura, bateria_percent, stress_score, ram, almacenamiento) " +
+                "VALUES (:empresa_id, :nombre, :ts, :cpu_percent, :ram_percent, :disco_percent, " +
+                ":temperatura, :bateria_percent, :stress_score, :ram, :almacenamiento)");
+
+            consumer.subscribe(Collections.singletonList(topic));
             while (true) {
-                ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofMillis(100));
+                ConsumerRecords<String, GenericRecord> records = consumer.poll(Duration.ofMillis(100));
                 if (records.isEmpty()) continue;
 
-                // Procesamos el lote en paralelo con Virtual Threads, pero NO confirmamos
-                // el offset hasta que todas las tareas del lote hayan terminado.
+                // Procesamos el lote en paralelo (Virtual Threads); ack al final.
                 List<Future<Boolean>> batch = new ArrayList<>();
-                for (ConsumerRecord<String, byte[]> record : records) {
-                    byte[] body = record.value();
-                    System.out.println("\n [x] Received Avro Telemetry (" + body.length + " bytes)");
-
-                    // Simular guardado RAW en MinIO
-                    System.out.println("     -> [Simulado] Guardando RAW " + body.length + " bytes en MinIO crudo /web-logs/part-XX");
-
-                    // Reenvío al RMI Enricher usando Virtual Threads.
-                    // Devuelve true si el registro queda "resuelto" (procesado o en DLT).
+                for (ConsumerRecord<String, GenericRecord> record : records) {
                     batch.add(executor.submit(() -> {
                         try {
-                            client.processTelemetry(body);
+                            processRecord(client, session, insert, record.value());
                             return true;
                         } catch (Exception e) {
-                            // El clúster RMI no pudo procesarlo: lo aparcamos en la
-                            // dead-letter en vez de perderlo o bloquear el pipeline.
                             return sendToDeadLetter(dlqProducer, DLQ_TOPIC, record, e);
                         }
                     }));
                 }
 
-                // Esperamos a que el lote completo quede resuelto.
                 boolean batchHandled = true;
                 for (Future<Boolean> f : batch) {
                     try {
@@ -223,8 +218,6 @@ public class Client {
                 }
 
                 if (batchHandled) {
-                    // ACK MANUAL: confirmamos el offset solo ahora que todo el lote
-                    // está procesado o aparcado de forma segura en la dead-letter.
                     try {
                         consumer.commitSync();
                         System.out.println("     -> [ACK] Offset confirmado para el lote (" + records.count() + " msg).");
@@ -232,10 +225,7 @@ public class Client {
                         System.err.println("Commit de offset falló (se reintentará el lote): " + e.getMessage());
                     }
                 } else {
-                    // No confirmamos y rebobinamos a los offsets iniciales del lote
-                    // para reprocesarlo en el próximo poll (puede generar duplicados:
-                    // semántica at-least-once).
-                    System.err.println("   ⚠️  Lote no resuelto (¿dead-letter caída?): rebobinando para reintentar.");
+                    System.err.println("   ⚠️  Lote no resuelto: rebobinando para reintentar.");
                     for (TopicPartition tp : records.partitions()) {
                         long firstOffset = records.records(tp).get(0).offset();
                         consumer.seek(tp, firstOffset);
@@ -245,25 +235,73 @@ public class Client {
         }
     }
 
+    /** Calcula StressScore por RMI y persiste la medición en Cassandra. */
+    private static void processRecord(Client client, CqlSession session,
+                                      PreparedStatement insert, GenericRecord r) throws Exception {
+        if (r == null) throw new IllegalArgumentException("registro Avro nulo");
+
+        long   empresaId = num(r, "empresa_id").longValue();
+        String nombre    = str(r, "nombre");
+        long   tsMillis  = num(r, "ts").longValue();
+        double cpu       = num(r, "cpu_percent").doubleValue();
+        double ram       = num(r, "ram_percent").doubleValue();
+        double disco     = num(r, "disco_percent").doubleValue();
+        Double temp      = optNum(r, "temperatura");
+        Double bateria   = optNum(r, "bateria_percent");
+        String ramTxt    = str(r, "ram");
+        String almTxt    = str(r, "almacenamiento");
+
+        // 1. Enriquecimiento StressScore en el clúster (RMI, con failover)
+        double stress = client.executeTask(new StressTask(cpu, ram, disco, temp));
+
+        // 2. Persistencia en Cassandra (webhardmon.mediciones)
+        BoundStatementBuilder b = insert.boundStatementBuilder()
+                .setLong("empresa_id", empresaId)
+                .setString("nombre", nombre)
+                .setInstant("ts", Instant.ofEpochMilli(tsMillis))
+                .setDouble("cpu_percent", cpu)
+                .setDouble("ram_percent", ram)
+                .setDouble("disco_percent", disco)
+                .setDouble("stress_score", stress)
+                .setString("ram", ramTxt)
+                .setString("almacenamiento", almTxt);
+        if (temp != null)    b = b.setDouble("temperatura", temp);     else b = b.setToNull("temperatura");
+        if (bateria != null) b = b.setDouble("bateria_percent", bateria); else b = b.setToNull("bateria_percent");
+        session.execute(b.build());
+
+        System.out.printf("   [OK] %s (empresa %d) stress=%.1f -> mediciones%n", nombre, empresaId, stress);
+    }
+
+    // --- Helpers de extracción de GenericRecord ---
+    private static Number num(GenericRecord r, String f) { return (Number) r.get(f); }
+    private static Double optNum(GenericRecord r, String f) {
+        Object v = r.get(f); return v == null ? null : ((Number) v).doubleValue();
+    }
+    private static String str(GenericRecord r, String f) {
+        Object v = r.get(f); return v == null ? null : v.toString();
+    }
+    private static String env(String k, String def) {
+        String v = System.getenv(k); return (v == null || v.isEmpty()) ? def : v;
+    }
+
     /**
-     * Envía un mensaje no procesable a la cola de mensajes muertos (Dead-Letter Topic).
-     * Adjunta en cabeceras el origen y la causa del fallo para diagnóstico posterior.
-     *
-     * @return true si el mensaje se escribió en la DLT (queda "resuelto"); false si ni
-     *         siquiera se pudo escribir en la DLT (hay que reintentar el lote completo).
+     * Aparca un mensaje no procesable en la dead-letter (con cabeceras de diagnóstico).
+     * @return true si se escribió en la DLT; false si ni la DLT respondió (reintentar lote).
      */
     private static boolean sendToDeadLetter(KafkaProducer<String, byte[]> producer, String dlqTopic,
-                                            ConsumerRecord<String, byte[]> original, Exception cause) {
+                                            ConsumerRecord<String, GenericRecord> original, Exception cause) {
         System.err.println("   ⚠️  Mensaje no procesable -> Dead-Letter (" + dlqTopic + "): " + cause.getMessage());
-        ProducerRecord<String, byte[]> dlqRecord =
-                new ProducerRecord<>(dlqTopic, original.key(), original.value());
+        byte[] body = original.value() == null
+                ? new byte[0]
+                : original.value().toString().getBytes(StandardCharsets.UTF_8);
+        ProducerRecord<String, byte[]> dlqRecord = new ProducerRecord<>(dlqTopic, original.key(), body);
         dlqRecord.headers()
             .add("dlq-origin-topic",     original.topic().getBytes(StandardCharsets.UTF_8))
             .add("dlq-origin-partition", String.valueOf(original.partition()).getBytes(StandardCharsets.UTF_8))
             .add("dlq-origin-offset",    String.valueOf(original.offset()).getBytes(StandardCharsets.UTF_8))
             .add("dlq-error",            String.valueOf(cause.getMessage()).getBytes(StandardCharsets.UTF_8));
         try {
-            producer.send(dlqRecord).get(); // .get() => esperamos la confirmación del broker
+            producer.send(dlqRecord).get();
             return true;
         } catch (Exception sendErr) {
             System.err.println("   ❌ No se pudo escribir en la Dead-Letter: " + sendErr.getMessage());

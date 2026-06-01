@@ -21,8 +21,14 @@ WORKDIR /app
 # Copy the built jar
 COPY --from=builder /build/client/target/client-1.0-SNAPSHOT.jar client.jar
 
-# Default environment variables
+# Default environment variables (sobre-escribibles al desplegar)
 ENV KAFKA_BOOTSTRAP_SERVERS="kafka:9092"
+ENV SCHEMA_REGISTRY_URL="http://schema-registry:8085"
+ENV TELEMETRY_TOPIC="telemetry"
+ENV CONSUMER_GROUP="telemetry_java_consumers"
+ENV CASSANDRA_CONTACT_POINTS="cassandra:9042"
+ENV CASSANDRA_LOCAL_DC="datacenter1"
+ENV CASSANDRA_KEYSPACE="webhardmon"
 ENV SEEDS=""
 ENV JVM_OPTS=""
 

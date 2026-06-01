@@ -10,6 +10,14 @@
 
   <artifactId>client</artifactId>
 
+  <!-- Repositorio de Confluent para el (de)serializador Avro con Schema Registry -->
+  <repositories>
+    <repository>
+      <id>confluent</id>
+      <url>https://packages.confluent.io/maven/</url>
+    </repository>
+  </repositories>
+
   <dependencies>
     <dependency>
       <groupId>com.telemetry</groupId>
@@ -21,6 +29,18 @@
       <groupId>org.apache.kafka</groupId>
       <artifactId>kafka-clients</artifactId>
       <version>3.7.0</version>
+    </dependency>
+    <!-- Deserializador Avro integrado con Confluent Schema Registry -->
+    <dependency>
+      <groupId>io.confluent</groupId>
+      <artifactId>kafka-avro-serializer</artifactId>
+      <version>7.6.0</version>
+    </dependency>
+    <!-- Driver de Cassandra (DataStax Java Driver) -->
+    <dependency>
+      <groupId>org.apache.cassandra</groupId>
+      <artifactId>java-driver-core</artifactId>
+      <version>4.18.1</version>
     </dependency>
   </dependencies>
 
