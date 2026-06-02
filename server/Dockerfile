@@ -26,6 +26,8 @@ ENV NODE_ID="node-1"
 ENV HOST="localhost"
 ENV PORT="6100"
 ENV SEEDS=""
+# Puerto fijo del objeto RMI (abrible en firewall/WireGuard). Vacío = anónimo.
+ENV RMI_OBJECT_PORT=""
 ENV JVM_OPTS=""
 
 # Use a shell entrypoint to allow environment variable expansion (like $SEEDS and $JVM_OPTS)

@@ -54,8 +54,16 @@ public class ClusterNode extends UnicastRemoteObject implements ComputeService {
     // El Thread Pool (Executors) para paralelizar las peticiones entrantes usando Virtual Threads (Java 25)
     private final ExecutorService executorPool = Executors.newVirtualThreadPerTaskExecutor();
 
+    /** Puerto de exportación del objeto remoto (fijo y abrible en firewall/WireGuard).
+     *  Por defecto 0 = puerto anónimo. Se fija con RMI_OBJECT_PORT (p.ej. 1100). */
+    private static int rmiObjectPort() {
+        String v = System.getenv("RMI_OBJECT_PORT");
+        try { return (v == null || v.isEmpty()) ? 0 : Integer.parseInt(v); }
+        catch (NumberFormatException e) { return 0; }
+    }
+
     public ClusterNode(String nodeId, String host, int port, List<Endpoint> seeds) throws RemoteException {
-        super(0); // export object on anonymous port; registry is the entry point
+        super(rmiObjectPort()); // export object on RMI_OBJECT_PORT (0 = anonymous); registry is the entry point
         this.self  = new Endpoint(nodeId, host, port);
         this.seeds = List.copyOf(seeds);
         for (Endpoint s : seeds) {

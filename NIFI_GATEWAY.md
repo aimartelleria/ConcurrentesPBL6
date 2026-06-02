@@ -1,140 +1,121 @@
-# 🛡️ Gateway de ingesta NiFi con verificación de licencia
+# 🛡️ Gateway de ingesta NiFi — validación + enriquecimiento contra MySQL
 
-NiFi se sitúa **entre los agentes Go y Kafka** como gateway de ingesta. Autentica
-a cada collector mediante su **licencia** (API key + portátil) comprobándola contra
-la base de datos `webhardmon` (tabla `licencia`, `activa = 1`). Solo las licencias
-activas se publican en Kafka; el resto se rechazan con **HTTP 401**.
+NiFi se sitúa **entre los agentes Go y Kafka**. Por cada mensaje, **consulta MySQL
+directamente** (NO la API de Java): valida la licencia y, en la misma consulta,
+obtiene `empresa_id` + `nombre` (nombre_ordenador). Con eso **enriquece** el registro
+y lo publica en Kafka serializado a **Avro** vía el **Schema Registry**. El clúster
+Java solo añade `stress_score` y escribe en `mediciones`.
 
 ```
-[Agente Go] --HTTP POST /telemetry--> [NiFi gateway] --verifica licencia (MySQL)--> ¿activa=1?
-   headers:                                                                          │ sí → PublishKafka → topic "telemetry"
-   X-License-Code = codigo                                                           │ no → HTTP 401 (rechazado)
-   X-Portatil     = portatil
-   body: Avro binario
+[Agente Go] --POST JSON /telemetry (header X-License-Code = codigo)--> [NiFi]
+   │  JOIN en telemetriadb:  SELECT activa, empresa_id, nombre  (licencia→usuario→empresa)
+   │     · 0 filas / activa=0 → HTTP 401 (rechazo)
+   │     · 1 fila            → enriquece el registro con empresa_id + nombre
+   ▼
+ PublishKafkaRecord (JSON→Avro vía Schema Registry) → topic "telemetry"
+   ▼
+ [Clúster Java]  lee empresa_id+nombre del Avro → stress_score → Cassandra mediciones
 ```
 
-> **Por qué NiFi (justificación):** desacopla a los agentes del broker (no manejan
-> credenciales ni topología de Kafka), centraliza la **autenticación por licencia**
-> con revocación inmediata (`activa = 0` desde el panel) y aporta trazabilidad de la
-> ingesta. Coste asumido: un salto de red adicional.
+> **Decisión de diseño:** la ingesta **no toca la API de Java** (`/api/agente/validar`
+> sigue existiendo solo para el panel). NiFi resuelve licencia y enriquecimiento con
+> **una sola consulta a MySQL**, así el clúster Java no necesita tocar MySQL.
+> El agente emite **JSON** (no conoce su `empresa_id`); NiFi hace la serialización Avro.
 
 ---
 
-## 1. Levantar la infraestructura
+## 1. Preparar MySQL: vista de lookup (una vez)
+
+El modelo es normalizado (`licencia` → `usuario` → `empresa`). Para que el lookup de
+NiFi resuelva el JOIN con una sola clave (`codigo`), se crea una **vista** en `telemetriadb`:
+
+```sql
+CREATE OR REPLACE VIEW licencia_lookup AS
+SELECT l.codigo            AS codigo,
+       l.activa            AS activa,
+       u.empresa_id        AS empresa_id,
+       u.nombre_ordenador  AS nombre
+FROM licencia l
+JOIN usuario  u ON u.id = l.usuario_id;
+```
+
+(La revocación sigue siendo `UPDATE licencia SET activa = 0 WHERE codigo = '...'`.)
+
+---
+
+## 2. Levantar la infraestructura
 
 La ingesta (NiFi + MySQL) está en `docker-compose.ingest.yml` y se fusiona con el
-compose "core" (que aporta `kafka`). Comparten red, por eso NiFi resuelve `kafka`/`mysql`.
+compose "core" (que aporta `kafka` y `schema-registry`).
 
 ```bash
 # Coloca antes el driver MySQL en nifi/drivers/ (ver nifi/drivers/README.md)
-
-# Local (core + ingesta):
 docker compose -f docker-compose.yml -f docker-compose.ingest.yml up -d
-
-# GCP (core de producción + ingesta):
-docker compose -f docker-compose.gcp.yml -f docker-compose.ingest.yml up -d
 ```
-
-- MySQL se inicializa con `db/init.sql` (esquema + seed de prueba).
-- NiFi: consola en **https://localhost:8443/nifi** (usuario `admin`, contraseña la del compose).
+NiFi: consola en **https://localhost:8443/nifi**.
 
 ---
 
-## 2. Construir el flujo en NiFi (una sola vez)
+## 3. Controller Services
 
-### 2.1 Controller Services
-
-**a) `DBCPConnectionPool`** (conexión a MySQL):
-| Propiedad | Valor |
+| Servicio | Config |
 |---|---|
-| Database Connection URL | `jdbc:mysql://mysql:3306/webhardmon` |
-| Database Driver Class Name | `com.mysql.cj.jdbc.Driver` |
-| Database Driver Location(s) | `/opt/nifi/drivers/mysql-connector-j-8.4.0.jar` |
-| Database User / Password | `root` / `root` |
-
-**b) `SimpleDatabaseLookupService`** (búsqueda de la licencia):
-| Propiedad | Valor |
-|---|---|
-| Database Connection Pool Service | *(el DBCPConnectionPool de arriba)* |
-| Table Name | `licencia` |
-| Lookup Key Column | `codigo` |
-| Lookup Value Column | `activa` |
-
-**c) `StandardHttpContextMap`** (necesario para el par request/response).
-
-Habilita los tres (rayo ⚡).
-
-### 2.2 Procesadores (encadenados)
-
-1. **`HandleHttpRequest`**
-   - Listening Port: `8081`
-   - Allowed Paths: `/telemetry`
-   - HTTP Context Map: `StandardHttpContextMap`
-   - → crea un FlowFile con el cuerpo Avro y los headers como atributos
-     (`http.headers.x-license-code`, `http.headers.x-portatil`).
-
-2. **`LookupAttribute`** (verifica que la licencia existe y obtiene `activa`)
-   - Lookup Service: `SimpleDatabaseLookupService`
-   - Dynamic property → **`licencia.activa`** = `${http.headers.x-license-code}`
-   - Relación **`unmatched`** (código inexistente) → va al paso de rechazo (5).
-   - Relación **`matched`** → continúa al paso 3.
-
-3. **`RouteOnAttribute`**
-   - Dynamic property → **`valida`** = `${licencia.activa:equals('1')}`
-   - Relación **`valida`** → paso 4 (publicar).
-   - Relación **`unmatched`** (activa = 0) → paso de rechazo (5).
-
-4. **`PublishKafka_2_6`** (rama válida)
-   - Kafka Brokers: `kafka:9092`
-   - Topic Name: `telemetry`
-   - Use Transactions: false
-   - relación `success` → **`HandleHttpResponse`** con **HTTP Status Code = 200**.
-
-5. **`HandleHttpResponse`** (rama de rechazo)
-   - HTTP Status Code: **401**
-   - Conecta aquí `unmatched` de `LookupAttribute` y `unmatched` de `RouteOnAttribute`.
-
-> **Opcional (endurecer):** para exigir además que el `portatil` coincida con el de
-> la licencia, sustituye `SimpleDatabaseLookupService` por `DatabaseRecordLookupService`
-> (devuelve varias columnas) y añade en el `RouteOnAttribute`:
-> `${licencia.activa:equals('1'):and(${licencia.portatil:equals(${http.headers.x-portatil})})}`.
-
-Arranca todos los procesadores (Start).
+| `DBCPConnectionPool` | URL `jdbc:mysql://mysql:3306/telemetriadb`, driver `com.mysql.cj.jdbc.Driver`, jar `/opt/nifi/drivers/mysql-connector-j-8.4.0.jar`, user/pass `root`/`root` |
+| `DatabaseRecordLookupService` | Connection Pool = el de arriba · **Table Name** `licencia_lookup` · **Lookup Key Column** `codigo` · **Value Columns** `activa,empresa_id,nombre` |
+| `JsonTreeReader` | lee el JSON del agente |
+| `AvroRecordSetWriter` | **Schema Write Strategy**: Confluent Schema Registry · esquema `telemetry` (= `schemas/telemetry.avsc`) |
+| `ConfluentSchemaRegistry` | URL `http://schema-registry:8081` |
+| `StandardHttpContextMap` | para el par request/response |
 
 ---
 
-## 3. Ejecutar el agente Go
+## 4. Flujo (procesadores encadenados)
 
+1. **`HandleHttpRequest`** — Listening Port `8081`, Allowed Paths `/telemetry`, HTTP Context Map.
+   El cuerpo es el JSON de métricas; `codigo` llega en el header `X-License-Code`.
+
+2. **`UpdateRecord`** (o `JoltTransformRecord`) — mete el `codigo` del header dentro del
+   registro (`/codigo = ${http.headers.x-license-code}`) para poder hacer el lookup por campo.
+
+3. **`LookupRecord`** — Reader `JsonTreeReader`, Writer `JsonRecordSetWriter`,
+   Lookup Service `DatabaseRecordLookupService`.
+   - Key: `/codigo` → añade `/activa`, `/empresa_id`, `/nombre` al registro.
+   - Relación **`unmatched`** (código inexistente) → **rechazo** (paso 6, 401).
+   - Relación **`matched`** → paso 4.
+
+4. **`RouteOnAttribute`/`QueryRecord`** — válido si `activa = 1` (y, opcional, que el
+   `nombre` del registro coincida con el de la licencia).
+   - válido → paso 5 · no válido → rechazo (paso 6, 401).
+
+5. **`PublishKafkaRecord`** — Reader `JsonRecordSetWriter`→ **Writer `AvroRecordSetWriter`**
+   (Confluent SR, esquema `telemetry`). Brokers `kafka:9092`, Topic `telemetry`.
+   Solo se escriben los campos del esquema `telemetry.avsc` (empresa_id, nombre, ts,
+   cpu_percent, …); el `codigo` extra se descarta. → `success` → `HandleHttpResponse` 200.
+
+6. **`HandleHttpResponse`** (rechazo) — HTTP Status Code **401**.
+
+> El `stress_score` NO lo pone NiFi: lo calcula el clúster Java y lo añade al escribir en `mediciones`.
+
+---
+
+## 5. Ejecutar el agente Go
+
+El agente envía **JSON** + el header de licencia (no conoce su `empresa_id`):
 ```bash
 cd AgenteGo-main
-
-# Licencia activa del seed -> aceptada (HTTP 200)
 go run . -mode=publisher -nifi-url="http://localhost:8081/telemetry" \
-         -codigo="DEMO-KEY-0001" -portatil="portatil-01"
-
-# Licencia inactiva -> rechazada (HTTP 401)
-go run . -mode=publisher -nifi-url="http://localhost:8081/telemetry" \
-         -codigo="DEMO-KEY-0002" -portatil="portatil-02"
+         -codigo="WHM-TEST-TEST-TEST-AABB" -portatil="PC-TEST"
 ```
-
-El agente imprime `telemetría aceptada por NiFi (HTTP 200)` o
-`licencia RECHAZADA por NiFi (HTTP 401)` según el caso.
-
----
-
-## 4. Gestión de licencias
-
-- **Alta**: el panel web inserta en `licencia` (`codigo`, `empresa_id`, `portatil`, `activa=1`).
-- **Revocación inmediata**: `UPDATE licencia SET activa = 0 WHERE codigo = '...';` →
-  NiFi empieza a rechazar ese collector en el siguiente envío, sin reiniciar nada.
+> ⚠️ **Cambio pendiente en el agente:** hoy serializa a Avro; con este diseño debe
+> enviar **JSON** (NiFi se encarga del Avro). Es un cambio pequeño (`json.Marshal` en
+> vez de `avro.Marshal`). Ver nota al final.
 
 ---
 
-## 5. Notas de seguridad y producción
+## 6. Notas
 
-- **HTTPS**: en producción, configura un `StandardRestrictedSSLContextService` en
-  `HandleHttpRequest` para que el `codigo` no viaje en claro. El agente Go funciona
-  igual cambiando `-nifi-url` a `https://...`.
-- **Cluster NiFi**: para HA, despliega 2+ nodos NiFi coordinados por ZooKeeper con un
-  balanceador delante del puerto 8081. Para la demo basta un nodo.
-- **Driver JDBC**: recuerda colocar el `.jar` en `nifi/drivers/` (ver su README).
+- **HTTPS** en producción: `StandardRestrictedSSLContextService` en `HandleHttpRequest`
+  para que el `codigo` no viaje en claro (el agente cambia `-nifi-url` a `https://...`).
+- **Cluster NiFi (HA)**: fuera de alcance del PBL (Kafka sí es HA; NiFi es nodo único).
+- **Driver JDBC**: coloca el `.jar` en `nifi/drivers/` (ver su README).
+- **El clúster Java no cambia**: ya lee `empresa_id`+`nombre` del Avro y escribe `mediciones`.

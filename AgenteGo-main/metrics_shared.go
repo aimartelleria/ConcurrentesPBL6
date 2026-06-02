@@ -7,14 +7,14 @@ import (
 )
 
 type Metrics struct {
-	Timestamp   int64    `avro:"timestamp"`
-	CPUPercent  float64  `avro:"cpu_percent"`
-	CPUModel    string   `avro:"cpu_model"`
-	RAMPercent  float64  `avro:"ram_percent"`
-	RAMTotal    int64    `avro:"ram_total"`
-	DiskPercent float64  `avro:"disk_percent"`
-	DiskTotal   int64    `avro:"disk_total"`
-	Temp        *float64 `avro:"temp_c"`
+	Timestamp   int64    `avro:"timestamp" json:"timestamp"`
+	CPUPercent  float64  `avro:"cpu_percent" json:"cpu_percent"`
+	CPUModel    string   `avro:"cpu_model" json:"cpu_model"`
+	RAMPercent  float64  `avro:"ram_percent" json:"ram_percent"`
+	RAMTotal    int64    `avro:"ram_total" json:"ram_total"`
+	DiskPercent float64  `avro:"disk_percent" json:"disk_percent"`
+	DiskTotal   int64    `avro:"disk_total" json:"disk_total"`
+	Temp        *float64 `avro:"temp_c" json:"temp_c"`
 }
 
 var metricsSchema avro.Schema

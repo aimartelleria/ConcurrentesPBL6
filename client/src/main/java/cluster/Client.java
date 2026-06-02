@@ -131,7 +131,7 @@ public class Client {
 
         // --- Configuración por entorno ---
         String kafkaBrokers = env("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094");
-        String srUrl        = env("SCHEMA_REGISTRY_URL",     "http://localhost:8085");
+        String srUrl        = env("SCHEMA_REGISTRY_URL",     "http://localhost:8081");
         String topic        = env("TELEMETRY_TOPIC",         "telemetry");
         String group        = env("CONSUMER_GROUP",          "telemetry_java_consumers");
         String cassPoints   = env("CASSANDRA_CONTACT_POINTS","localhost:9042");

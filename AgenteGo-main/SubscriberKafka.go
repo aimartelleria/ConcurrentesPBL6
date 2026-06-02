@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -12,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hamba/avro/v2"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
@@ -129,21 +129,22 @@ func sendMetrics(nifiURL, codigo, portatil string) {
 	// Printear mensaje antes de serializar
 	fmt.Printf("[%s] Datos recolectados normales: %+v\n", time.Now().Format("2006-01-02 15:04:05"), payload)
 
-	body, err := avro.Marshal(metricsSchema, payload)
+	body, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("Error al serializar a Avro: %v", err)
+		log.Printf("Error al serializar a JSON: %v", err)
 		return
 	}
 
 	// 2. Envío al gateway NiFi (autenticación por licencia).
-	// La telemetría Avro va en el cuerpo; la licencia (codigo) y el portátil
-	// viajan en cabeceras para que NiFi las verifique contra MySQL (activa = 1).
+	// La telemetría va en JSON; NiFi valida la licencia contra MySQL, enriquece
+	// con empresa_id+nombre y serializa a Avro (Schema Registry) antes de Kafka.
+	// La licencia (codigo) y el nombre del ordenador viajan en cabeceras.
 	req, err := http.NewRequest(http.MethodPost, nifiURL, bytes.NewReader(body))
 	if err != nil {
 		log.Printf("Error creando la petición HTTP a NiFi: %v", err)
 		return
 	}
-	req.Header.Set("Content-Type", "application/avro-binary")
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-License-Code", codigo)
 	req.Header.Set("X-Portatil", portatil)
 

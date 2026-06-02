@@ -6,13 +6,15 @@ Este documento proporciona una visión unificada, profunda y definitiva sobre la
 
 ## 1. 🎯 Visión General
 
-El sistema es una **red distribuida de computación *Peer-to-Peer* (P2P) y procesamiento de telemetría sin Punto Único de Fallo (SPOF)**. Su propósito es recoger datos de hardware (telemetría), encolarlos para evitar pérdida de datos en picos de carga, y distribuirlos a un enjambre de nodos de computación que se autodescubren mediante un protocolo *Gossip*. 
+El sistema es una **red distribuida de computación *Peer-to-Peer* (P2P) y procesamiento de telemetría sin Punto Único de Fallo (SPOF)**. Su propósito es recoger datos de hardware (telemetría), validarlos en una pasarela de ingesta, encolarlos para evitar pérdida de datos en picos de carga, distribuirlos a un enjambre de nodos de computación que se autodescubren mediante un protocolo *Gossip* y persistir el resultado.
 
 A nivel funcional, el sistema:
-1. **Recopila** métricas en máquinas externas.
-2. **Serializa y encola** de forma altamente eficiente.
-3. **Distribuye** el trabajo o telemetría a través de una malla P2P de nodos Java.
-4. **Resiste** caídas de nodos, redireccionando el tráfico automáticamente de manera distribuida.
+1. **Recopila** métricas en máquinas externas (agentes Go).
+2. **Valida y gobierna la ingesta** mediante un *gateway* Apache NiFi que autentica por licencia contra la BD de la aplicación (MySQL) y serializa a Avro con Schema Registry.
+3. **Serializa y encola** de forma altamente eficiente en Apache Kafka.
+4. **Distribuye** el cálculo (StressScore) a través de una malla P2P de nodos Java vía RMI.
+5. **Persiste** las mediciones enriquecidas en Cassandra.
+6. **Resiste** caídas de nodos, redireccionando el tráfico automáticamente de manera distribuida, con *ack* manual y *dead-letter* en el consumidor para garantía *at-least-once*.
 
 ---
 
@@ -21,30 +23,40 @@ A nivel funcional, el sistema:
 La arquitectura está formada por varios subsistemas especializados que operan de forma desacoplada:
 
 ```text
-┌────────────────┐     Avro     ┌──────────────────┐
-│   Agente Go    ├─────────────►│      Kafka       │ (Topic de Ingesta)
-│  (Data Source) │              │     (Broker)     │
-└────────────────┘              └────────┬─────────┘
-                                         │ Consumo
-                                         ▼
+┌────────────────┐  HTTP   ┌──────────────────┐  Avro + Schema Registry  ┌──────────────────┐
+│   Agente Go    ├────────►│   NiFi (gateway) ├─────────────────────────►│      Kafka       │
+│  (Data Source) │  POST   │ valida licencia  │     PublishKafka         │  topic telemetry │
+└────────────────┘         │  (MySQL: app DB) │                          └────────┬─────────┘
+                           └──────────────────┘                                   │ Consumo
+                                                                                  ▼
                  ┌────────────────────────────────────────────────────────┐
-                 │                      CLIENTE JAVA                      │
-                 │   (Consumidor Kafka + RMI Bootstrap + Load Balancer)   │
+                 │                  CLIENTE JAVA (rmi-client)             │
+                 │  KafkaConsumer (KafkaAvroDeserializer, ack manual +    │
+                 │  dead-letter telemetry.DLT) + RMI Bootstrap + LB       │
                  └────────────────────────────────────────────────────────┘
                            │                  │                  │
                 RMI / TLS  │                  │ RMI / TLS        │ RMI / TLS
                            ▼                  ▼                  ▼
                     ┌─────────┐        ┌─────────┐        ┌─────────┐
-    Protocolo       │  NODO 1 │◄──────►│  NODO 2 │◄──────►│  NODO 3 │
+    Protocolo       │  NODO 1 │◄──────►│  NODO 2 │◄──────►│  NODO 3 │   (rmi-server x3)
     Gossip P2P      │(Compute)│        │(Compute)│        │(Compute)│
     (Membresía)     └─────────┘        └─────────┘        └─────────┘
+                           │                  │                  │
+                           └──────────────────┴──────────────────┘
+                                              ▼
+                                    ┌───────────────────┐
+                                    │     Cassandra     │  keyspace webhardmon
+                                    │ (mediciones, etc.)│  tabla mediciones
+                                    └───────────────────┘
 ```
 
 ### Componentes Clave:
-1. **Source (Agente Go):** Obtiene datos del sistema operativo y genera cargas útiles (*payloads*).
-2. **Buffer (Kafka):** Desacopla la emisión de datos de la capacidad y velocidad de procesamiento del cluster de Java.
-3. **Edge / Entrypoint (Cliente Java):** Actúa como un puente. Escucha mensajes de Kafka y los balancea (Round-Robin tolerante a fallos) enviándolos por RMI al cluster.
-4. **Compute Grid (Servidores ClusterNode):** Malla de nodos que ejecutan el motor de cálculo genérico (`Task`) o procesan telemetría localmente. Mantienen su estado (quién está vivo/muerto) "cotilleando" (Gossip) entre sí.
+1. **Source (Agente Go):** Obtiene datos del sistema operativo y genera cargas útiles (*payloads*), que envía por HTTP al gateway de ingesta.
+2. **Gateway de ingesta (Apache NiFi):** Se sitúa entre los agentes y Kafka. Autentica a cada collector por su **licencia** contra la BD de la aplicación (MySQL: tabla `licencia`, `activa = 1`), serializa a Avro gobernado por Schema Registry y publica en Kafka. Las licencias inactivas o inexistentes se rechazan con **HTTP 401**. (Detalle completo en `NIFI_GATEWAY.md`.)
+3. **Buffer (Kafka):** Desacopla la emisión de datos de la capacidad y velocidad de procesamiento del cluster de Java. El topic `telemetry` transporta Avro con Schema Registry.
+4. **Edge / Entrypoint (Cliente Java, `rmi-client`):** Actúa como un puente. Consume de Kafka con `KafkaAvroDeserializer`, calcula el StressScore vía RMI (balanceo Round-Robin tolerante a fallos) y persiste en Cassandra. Usa **ack manual** (`commitSync` con `enable.auto.commit=false`) y **dead-letter** (`telemetry.DLT`) para garantía *at-least-once*.
+5. **Compute Grid (Servidores ClusterNode, `rmi-server` x3):** Malla de nodos que ejecutan el motor de cálculo genérico (`Task`), en particular `StressTask`. Mantienen su estado (quién está vivo/muerto) "cotilleando" (Gossip) entre sí.
+6. **Almacenamiento:** **Cassandra** (keyspace `webhardmon`: tablas `mediciones`, `ordenadores`, `empresas`) para la serie temporal de telemetría, y **MySQL** como BD de la aplicación (empresa, administrador, usuario, licencia; autenticación de los agentes por licencia).
 
 ---
 
@@ -76,9 +88,20 @@ El bróker de mensajería distribuido.
 El `AgenteGo` se encarga de extraer la métrica e iniciar el ciclo vital de los datos.
 - **Justificación:** Go se compila como un binario estático, sin requerir una JVM de 200MB en las máquinas de donde obtiene los datos. Es altamente concurrente y consume ~15MB-30MB de memoria en ejecución. Ideal para *sidecars* y sistemas embebidos de monitorización.
 
-### 🌟 3.6. Apache Avro
-Para la codificación del mensaje de Kafka a RMI.
+### 🌟 3.6. Apache Avro + Schema Registry
+Para la codificación del mensaje publicado en Kafka.
 - **Justificación:** Frente a JSON que necesita descifrar strings, Avro comprime los datos de forma binaria apoyado en un *schema* fijo, reduciendo drásticamente (hasta en un 70%) el tamaño de banda ocupada en red y acelerando la de-serialización.
+- **Gobierno del esquema:** un **Schema Registry** (Confluent en local; compatible con Apicurio) centraliza la definición del esquema (`schemas/telemetry.avsc`). NiFi serializa con él al publicar y el cliente Java deserializa con `KafkaAvroDeserializer`, garantizando compatibilidad y evolución controlada del contrato de datos.
+
+### 🌟 3.7. Apache NiFi (Gateway de ingesta con verificación de licencia)
+Pasarela que media entre los agentes Go y Kafka.
+- **Justificación:** desacopla a los agentes del broker (no manejan credenciales ni topología de Kafka), centraliza la **autenticación por licencia** contra MySQL con revocación inmediata (`activa = 0`) y aporta trazabilidad de la ingesta. Solo las licencias activas se publican en `telemetry`; el resto se rechaza con HTTP 401.
+- **Resultado:** control de acceso por collector sin tocar el código de los agentes, a coste de un salto de red adicional. Documentado en `NIFI_GATEWAY.md`.
+
+### 🌟 3.8. Apache Cassandra
+Almacén de la serie temporal de telemetría.
+- **Justificación:** Cassandra ofrece escritura rápida y escalabilidad horizontal lineal para series temporales de alto volumen, ideal para el flujo continuo de mediciones. El keyspace `webhardmon` modela `mediciones` (particionada por `empresa_id` y ordenada por `ts DESC`), junto con `ordenadores` y `empresas`.
+- **Justificación de la doble BD:** MySQL conserva el modelo relacional de la aplicación (empresa, administrador, usuario, licencia) y la autenticación de agentes; Cassandra absorbe la carga de escritura de telemetría sin penalizar la BD relacional.
 
 ### 🌟 3.7. TLS/SSL para Cifrado
 Para la comunicación en el interior del cluster.
@@ -91,13 +114,15 @@ Para la comunicación en el interior del cluster.
 Para empaquetar cómo coopera todo, este es el viaje de 1 milisegundo de tu aplicación:
 
 1. **[GO]** Un sensor en el Agente de Go detecta que la CPU local está al 90%. Empaqueta esta información.
-2. **[GO -> AVRO]** Go serializa la métrica utilizando codificación binaria *Avro* y un schema compartido.
-3. **[GO -> KAFKA]** Go envía este paquete binario al topic `telemetry` en *Kafka*.
+2. **[GO -> NIFI]** Go envía la métrica por HTTP POST al gateway de NiFi, incluyendo las cabeceras de licencia (`X-License-Code`, `X-Portatil`).
+3. **[NIFI]** NiFi verifica la licencia contra MySQL (`licencia.activa = 1`). Si es inválida, responde **HTTP 401** y descarta el dato. Si es válida, serializa a **Avro** (gobernado por Schema Registry) y publica en el topic `telemetry` de Kafka (HTTP 200 al agente).
 4. **[BROKER]** Kafka almacena el paquete y se asegura de que exista persistencia y replicación.
-5. **[JAVA CLIENT]** El nodo `Client` ("el consumidor"), escuchando mediante un bucle de consumo en el hilo principal, recibe instantáneamente desde Kafka el paquete Avro.
-6. **[JAVA CLIENT -> LOAD BALANCER]** El `Client` verifica su caché Gossip. Descubre que hay 3 nodos vivos. El puntero *round-robin* selecciona el `NODO 2` y despacha el procesamiento en un Virtual Thread.
-7. **[JAVA RMI (TLS)]** El Virtual Thread invoca `stubNODO2.processTelemetry(paquete_avro)`. El flujo viaja por red con encriptación TLS.
-8. **[JAVA NODE]** El `NODO 2` (Motor de Cálculo) recibe el Byte Array instanciando un *Virtual Thread*, deserializa el paquete y efectúa la lógica de transformación / cálculo o almacenamiento final.
+5. **[JAVA CLIENT]** El `rmi-client` ("el consumidor"), mediante un bucle de `poll`, recibe el registro Avro y lo deserializa con `KafkaAvroDeserializer` (resolviendo el esquema vía Schema Registry).
+6. **[JAVA CLIENT -> LOAD BALANCER]** El `Client` verifica su caché Gossip. Descubre que hay 3 nodos vivos. El puntero *round-robin* selecciona el `NODO 2` y despacha el cálculo en un Virtual Thread.
+7. **[JAVA RMI (TLS)]** El Virtual Thread invoca remotamente el cálculo del `StressScore` (mediante `StressTask`) sobre el `NODO 2`. El flujo viaja por red con encriptación TLS.
+8. **[JAVA NODE]** El `NODO 2` (Motor de Cálculo) ejecuta `StressTask.execute()` en un *Virtual Thread* y devuelve el StressScore.
+9. **[CASSANDRA]** El cliente persiste la medición enriquecida (métricas + StressScore) en `webhardmon.mediciones`.
+10. **[ACK]** Solo tras procesar y persistir el lote, el cliente confirma el *offset* con `commitSync` (**ack manual**, `enable.auto.commit=false`). Un mensaje no procesable se aparca en la **dead-letter** `telemetry.DLT` sin bloquear el flujo, garantizando *at-least-once*.
 
 
 ## 5. 🚀 Resiliencia (Casos Extremos)
@@ -105,6 +130,8 @@ Para empaquetar cómo coopera todo, este es el viaje de 1 milisegundo de tu apli
 - **Un Nodo de procesado se quema/cae:** Los demás dejarán de recibir pings. Tras 3-5 iteraciones, el nodo se elimina del Directorio Global P2P. El Cliente al fallar su intento inicial, lanza un *Failover* automático e intenta el siguiente nodo transparente. Ningún dato de Kafka se pierde.
 - **Go genera 100 veces más tráfico del habitual:** Kafka se encargará del encolamiento y almacenamiento. El cluster procesará tan rápido como pueda.
 - **Se incorporan más Nodos:** Simplemente arrancan un nuevo proceso instanciado apontando a la capa de Semillas (*Seeds*). En un par de *pings* el cluster entero conoce los nuevos recursos computacionales disponibles de forma orgánica.
+- **El consumidor falla al procesar/persistir un mensaje:** gracias al **ack manual**, el *offset* solo se confirma tras procesar el lote, de modo que un fallo provoca el reprocesamiento (semántica *at-least-once*) y ningún mensaje se pierde. Un mensaje irrecuperable (p.ej. corrupto) se desvía a la **dead-letter** `telemetry.DLT` con cabeceras de diagnóstico, sin bloquear el resto del flujo.
+- **Un collector con licencia revocada o falsa intenta inyectar datos:** NiFi lo rechaza en el gateway con **HTTP 401** verificando `licencia.activa` contra MySQL, antes de tocar Kafka. La revocación (`activa = 0`) surte efecto en el siguiente envío sin reiniciar nada.
 
 ---
 
@@ -197,3 +224,43 @@ Se evaluó el comportamiento global del sistema distribuyendo **150 tareas de al
        java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Benchmark cluster localhost:6100 localhost:6101 localhost:6102
        ```
   4. El programa despacha en paralelo las 150 tareas desde el cliente mediante un pool de hilos virtuales balanceándolas uniformemente en Round-Robin entre los stubs RMI disponibles. Mide el tiempo total en milisegundos que le toma procesar el lote completo bajo cada topología de clúster incremental y calcula el rendimiento (tareas/seg).
+
+---
+
+## 7. 📦 Despliegue y Operación
+
+El sistema se empaqueta en contenedores y se despliega por **capas de Docker Compose**, lo que permite levantar solo el núcleo de procesamiento o el stack completo con ingesta.
+
+### 7.1. Imágenes
+| Imagen | Rol | Réplicas |
+|---|---|---|
+| `rmi-server` | Nodo del clúster RMI (calcula StressScore). Clúster P2P con gossip. | 3 (1 por VM) |
+| `rmi-client` | Puente: consume Kafka (Avro/SR) → StressScore por RMI → escribe Cassandra. | 1 |
+
+Se construyen desde `server/Dockerfile` y `client/Dockerfile` y se publican en **Harbor** (local) o **Artifact Registry** (GCP). Detalle del contrato de integración en `CONTAINER_CONTRACT.md`.
+
+### 7.2. Compose por capas
+- **`docker-compose.yml` (core):** Kafka + Schema Registry + Cassandra (con `cassandra-init` que carga `db/schema-cassandra.cql`) + 3 nodos `rmi-server` + `rmi-client`. Es un entorno end-to-end de procesamiento sin necesidad de la infra del equipo.
+- **`docker-compose.ingest.yml` (overlay de ingesta):** añade **NiFi** + **MySQL** (inicializado con `db/init.sql`). Se fusiona con el core compartiendo red:
+  ```bash
+  docker compose -f docker-compose.yml -f docker-compose.ingest.yml up -d
+  ```
+- **`docker-compose.gcp.yml` (producción):** core de producción en GCP; admite el mismo overlay de ingesta con `-f`.
+
+### 7.3. Nube y orquestación
+- **GCP turnkey:** `deploy-gcp.sh` automatiza el despliegue en Google Cloud (ver `DEPLOY_GCP.md`).
+- **Kubernetes:** `k8s-deployment.yaml` describe el despliegue en clúster K8s.
+- **Infraestructura del equipo:** repositorio OpenTofu **`webhardmon-infra`** que provisiona **3 nubes** (Proxmox local + GCP-A + GCP-B) interconectadas por una malla **WireGuard**, con **Cloudflare Tunnel** para exposición y registries **Harbor** + **Artifact Registry**.
+  > ⚠️ **RMI sobre WireGuard:** los `HOST`/`SEEDS`/`java.rmi.server.hostname` deben ser nombres/IPs del *WireGuard*, no de Docker, o los stubs RMI apuntarán a direcciones inalcanzables entre VMs.
+
+### 7.4. Integración Continua (CI)
+- **SonarCloud:** `.github/workflows/sonar.yml` analiza el monorepo multi-lenguaje (**Java 21** de los 3 módulos Maven + **Go** del agente). Configuración en `sonar-project.properties`.
+
+### 7.5. Ficheros clave del proyecto
+| Fichero | Propósito |
+|---|---|
+| `schemas/telemetry.avsc` | Esquema Avro del topic `telemetry` (subject `telemetry-value`). |
+| `db/schema-cassandra.cql` | Keyspace `webhardmon` y tablas (`mediciones`, `ordenadores`, `empresas`). |
+| `db/init.sql` | Esquema + seed de la BD de la aplicación (MySQL). |
+| `NIFI_GATEWAY.md` | Guía del gateway de ingesta NiFi y la verificación de licencia. |
+| `CONTAINER_CONTRACT.md` | Contrato de despliegue de las imágenes `rmi-server`/`rmi-client`. |

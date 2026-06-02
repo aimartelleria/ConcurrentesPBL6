@@ -35,6 +35,65 @@ Es como una red de computadoras donde cada una es independiente, pero todas se c
 
 ---
 
+## 🌐 Pipeline Extremo a Extremo (WebHardMon)
+
+El cluster RMI es el motor de cómputo dentro de un pipeline de telemetría más amplio. El flujo completo es:
+
+```
+┌──────────────┐   HTTP POST     ┌──────────────────────┐   Avro     ┌──────────────┐
+│  Agente Go   │  X-License-Code │   Apache NiFi        │  + Schema  │ Apache Kafka │
+│ (collector)  │ ──────────────► │  (gateway ingesta)   │ ─Registry─►│ topic        │
+│ CPU/RAM/disco│  X-Portatil     │ valida licencia      │  Registry  │ "telemetry"  │
+│ temperatura  │                 │ vs MySQL (activa),   │            │ 9092/9094    │
+└──────────────┘                 │ serializa a Avro,    │            └──────┬───────┘
+                                  │ enriquece empresa_id │                   │
+                                  │ y nombre_ordenador,  │                   │ KafkaConsumer
+                                  │ enruta válidos /     │                   │ (Avro deser.)
+                                  │ rechaza inválidos    │                   ▼
+                                  └──────────────────────┘            ┌──────────────┐
+                                                                      │ Client Java  │
+                          ┌───────────────────────────────────────── │ (rmi-client) │
+                          │  RMI: StressScore (round-robin + failover)│ ack MANUAL + │
+                          ▼                                           │ dead-letter  │
+                  ┌────────────────────────┐                         │ (telemetry.  │
+                  │  Cluster RMI x3         │                         │  DLT)        │
+                  │  (ClusterNode, gossip,  │                         └──────┬───────┘
+                  │  Virtual Threads J21)   │                                │ persiste
+                  │  StressTask:            │                                ▼
+                  │  0.4*CPU+0.4*RAM+0.2*Dco│                         ┌──────────────┐
+                  │  (+20 si temp>80)       │                         │  Cassandra   │
+                  │  acotado a [0,100]      │                         │ keyspace     │
+                  └────────────────────────┘                         │ webhardmon   │
+                                                                      │ (mediciones) │
+                                                                      └──────────────┘
+```
+
+### Componentes del pipeline
+
+1. **Agente Go (collector)**: mide CPU/RAM/disco/temperatura. Ya **no** publica directo a Kafka: hace `HTTP POST` a un gateway Apache NiFi con cabeceras de licencia (`X-License-Code` = código, `X-Portatil`).
+2. **Apache NiFi (gateway de ingesta)**: valida la licencia del agente contra la BD de aplicación en **MySQL** (debe estar activa), serializa a **Avro** usando un **Schema Registry**, enruta los válidos a Kafka y rechaza los inválidos. Enriquece con `empresa_id` y `nombre` (`nombre_ordenador`).
+3. **Apache Kafka** (topic `telemetry`, 9092 interno / 9094 externo): bus asíncrono. Avro en el cable con **Schema Registry** (Confluent/Apicurio) como fuente única del esquema.
+4. **Client Java (rmi-client)**: `KafkaConsumer` con `KafkaAvroDeserializer`. **ACK MANUAL** (commit del offset solo tras procesar el lote) + **DEAD-LETTER** (topic `telemetry.DLT`) ⇒ entrega **at-least-once**. Calcula el StressScore en el cluster por RMI y **persiste en Cassandra** (keyspace `webhardmon`, tabla `mediciones`).
+5. **Cluster RMI (rmi-server x3)**: P2P sin punto único de fallo, descubrimiento por gossip, **Virtual Threads (Java 21)**. Ejecuta `StressTask`.
+6. **Almacenamiento**: **Cassandra** (`mediciones` = serie temporal, `ordenadores` = inventario, `empresas`) y **MySQL** = BD de la aplicación (empresa, administrador, usuario, licencia) y autenticación de agentes por licencia.
+
+### Middleware
+
+- **Java RMI**: cómputo distribuido (cálculo del StressScore en el cluster).
+- **Apache Kafka**: mensajería asíncrona (topic `telemetry`, grupo `telemetry_java_consumers`).
+
+> El proyecto **ya no usa RabbitMQ/AMQP**. Toda la mensajería pasa por Kafka.
+
+### Fiabilidad y seguridad
+
+- **TLS opcional** en RMI.
+- **Autenticación de agentes por licencia** (`codigo`) verificada en NiFi contra MySQL.
+- **Ack manual + dead-letter** en Kafka.
+- **Failover** RMI (round-robin + reintentos).
+- **Gobierno de esquema** con Schema Registry.
+
+---
+
 ## 📁 Explicación de Cada Archivo
 
 ### 1. **Endpoint.java** 🗺️
@@ -144,9 +203,10 @@ Una marca que dice "este nodo estaba muerto". Evita que otros nodos sigan intent
 ```
 
 **¿Qué simula el cliente?**
-- Un puente (consumidor) que recibe datos desde RabbitMQ y los pasa al cluster.
-- En el `main()` se conecta a RabbitMQ (usando Virtual Threads) y consume de la cola `telemetry_java_consumer_queue`.
-- Por cada mensaje Avro recibido, hace: `processTelemetry(payload)` a un nodo del cluster.
+- Un puente (consumidor) que recibe datos desde Apache Kafka y los pasa al cluster.
+- En el `main()` se conecta a Kafka (usando Virtual Threads) como `KafkaConsumer` con `KafkaAvroDeserializer` (Schema Registry), consumiendo del topic `telemetry` dentro del grupo `telemetry_java_consumers`.
+- Por cada mensaje Avro recibido, calcula el StressScore por RMI (`processTelemetry(payload)` en un nodo del cluster) y persiste el resultado en Cassandra (keyspace `webhardmon`, tabla `mediciones`).
+- Garantía **at-least-once**: ACK MANUAL (commit del offset solo tras procesar el lote) + DEAD-LETTER (topic `telemetry.DLT`) para los mensajes que fallan.
 - Simula: **Ingesta asíncrona, balanceo de carga, recuperación de fallos, y descubrimiento dinámico**.
 
 ---
@@ -157,7 +217,7 @@ Una marca que dice "este nodo estaba muerto". Evita que otros nodos sigan intent
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ CLIENT (Consumer de RabbitMQ)                                │
+│ CLIENT (KafkaConsumer del topic "telemetry", Avro)           │
 └─────────────────────────────────────────────────────────────┘
                               │
                     ¿Conozco miembros?
@@ -171,11 +231,11 @@ Una marca que dice "este nodo estaba muerto". Evita que otros nodos sigan intent
                      │         │
               "Dame lista"  "Procesa telemetría (Avro)"
                      │         │
-              ✓ Responde    ✓ Responde y procesa ETL
+              ✓ Responde    ✓ Responde y calcula StressScore
                      │         │
-             Guardo lista    Ack a RabbitMQ
-             [members]        
-                     │
+             Guardo lista    Persiste en Cassandra +
+             [members]       commit MANUAL del offset
+                     │        (fallo → topic telemetry.DLT)
             Siguiente mensaje
             round-robin
             (NODE-3)
@@ -210,6 +270,7 @@ Cliente intenta processTelemetry():
 - Intenta NODE-1: TIMEOUT ❌
 - Refresca lista de miembros: FALLA (sin conexión)
 - Lanza excepción: "All members failed even after a refresh"
+- Al no hacer commit del offset (ACK MANUAL), Kafka re-entregará el mensaje (at-least-once)
 ```
 
 ### Escenario 3: Nodo se reinicia
@@ -380,11 +441,19 @@ Si se cae NODE-2, la web sigue funcionando usando NODE-1 y NODE-3.
 │ CLUSTER RMI - ARQUITECTURA GENERAL                 │
 ├─────────────────────────────────────────────────────┤
 │                                                     │
-│  Componentes:                                      │
+│  Componentes (cluster RMI):                        │
 │  1. Endpoint     → Identidad de red (IP:puerto)   │
 │  2. ComputeService → Interfaz remota              │
 │  3. ClusterNode  → Servidor con gossip             │
-│  4. Client       → Consumidor de servicios         │
+│  4. Client       → KafkaConsumer + RMI + Cassandra │
+│                                                    │
+│  Pipeline (extremo a extremo):                     │
+│  • Agente Go    → collector (HTTP a NiFi)          │
+│  • Apache NiFi  → valida licencia + Avro           │
+│  • Schema Reg.  → fuente única del esquema Avro    │
+│  • Apache Kafka → bus async (topic "telemetry")    │
+│  • Cassandra    → mediciones (keyspace webhardmon) │
+│  • MySQL        → BD app + licencias de agentes    │
 │                                                    │
 │  Mecanismos:                                       │
 │  • RMI Registry     → Directorio de servicios     │
@@ -392,6 +461,8 @@ Si se cae NODE-2, la web sigue funcionando usando NODE-1 y NODE-3.
 │  • Tombstones       → Marca de nodos muertos      │
 │  • Round-robin      → Balanceo de carga           │
 │  • Failover         → Recuperación automática      │
+│  • Virtual Threads  → Concurrencia (Java 21)       │
+│  • Ack manual + DLT → Entrega at-least-once        │
 │                                                    │
 └─────────────────────────────────────────────────────┘
 ```

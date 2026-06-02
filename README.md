@@ -17,10 +17,31 @@ list of seeds (any one alive is enough). Killing any subset short of
   Task.java             Generic computing task interface for compute engine
   ComputeService.java   Remote interface: getNodeId, ping, executeTask, processTelemetry, gossip
   ClusterNode.java      Self-registering, gossip-driven peer (Virtual Threads)
-  Client.java           Multi-seed bootstrap + round-robin + failover + RabbitMQ consumer
+  Client.java           Multi-seed bootstrap + round-robin + failover + Kafka consumer
 ```
 
 ## Design
+
+**End-to-end telemetry pipeline.** A Go collector agent on each user machine
+measures CPU/RAM/disk/temperature and sends it via HTTP POST to an **Apache
+NiFi** ingestion gateway with license headers (`X-License-Code`, `X-Portatil`)
+— it no longer publishes to Kafka directly. NiFi validates the agent's license
+against MySQL (must be active), enriches with `empresa_id`/`nombre`, serializes
+to **Avro** using a **Schema Registry**, and routes valid records to **Kafka**
+(topic `telemetry`) while rejecting invalid ones. The Java `rmi-client`
+consumes from Kafka with a `KafkaAvroDeserializer`, computes each measurement's
+StressScore on the RMI cluster, and persists to **Cassandra**:
+
+```
+Go agent --HTTP--> NiFi (license check, enrich, Avro) --> Kafka (Avro/Schema Registry)
+        --> rmi-client (manual ack + DLT) --> RMI cluster (StressScore) --> Cassandra
+```
+
+The cluster computes `StressScore = 0.4*CPU + 0.4*RAM + 0.2*Disk (+20 if
+temperature > 80)`, clamped to `[0, 100]`. Storage is split between Cassandra
+(`mediciones`, `ordenadores`, `empresas`) and MySQL (application data:
+`empresa`, `administrador`, `usuario`, `licencia`, plus agent auth by license).
+The middleware is **Java RMI + Apache Kafka**.
 
 **No shared infrastructure.** Each node calls `LocateRegistry.createRegistry(port)`
 on its own port and binds itself locally as `"ComputeNode"`. There is no
@@ -110,6 +131,11 @@ needed. Restart a node and it rejoins on first gossip; you'll see
   step; everything after is discovered.
 - **Wire encryption is supported.** We use JVM SSL properties (e.g. `-Djavax.net.ssl.trustStore`) for encryption across untrusted networks. Ver `RUN_WITH_TLS.md`.
 - **Despliegue en cloud (GCP).** Todo el stack (Kafka + Client + 3 nodos) se sube con un solo comando: `cp .env.example .env` → editar → `./deploy-gcp.sh`. Ver `DEPLOY_GCP.md` para la guía completa (GCE turnkey y GKE).
+- **Local stack with docker compose.** The published images are `rmi-server`
+  (the `ClusterNode` peers) and `rmi-client` (the Kafka consumer). The core
+  stack — Kafka + Schema Registry + Cassandra + 3 RMI nodes + client — comes up
+  with `docker compose up`; layer the ingestion overlay (Apache NiFi + MySQL) on
+  top with `docker compose -f docker-compose.yml -f docker-compose.ingest.yml up`.
 
 ## Known limits
 
@@ -121,7 +147,14 @@ needed. Restart a node and it rejoins on first gossip; you'll see
   serving on the assumption the other side is dead. For a stateless
   service like a Compute Engine, that's the right behaviour. For anything that
   mutates state, you need a consensus protocol (Raft, Paxos) on top.
-- **`processTelemetry` relies on RabbitMQ.** Ensure RabbitMQ is configured properly.
+- **`processTelemetry` consumes from Kafka.** Telemetry now flows over an
+  Apache Kafka topic (`telemetry`) using Avro with a Schema Registry. The
+  consumer uses **manual offset commit** (committed only after the batch is
+  processed) plus a **dead-letter topic** (`telemetry.DLT`), giving
+  at-least-once semantics. For each measurement the StressScore is computed on
+  the RMI cluster (round-robin + failover) and persisted to Cassandra
+  (keyspace `webhardmon`, table `mediciones`). Ensure Kafka, the Schema
+  Registry and Cassandra are reachable.
 - **O(N²) gossip.** Every node pings every other peer every round.
   Fine up to dozens of nodes; beyond that, sample a random K peers per
   round instead.

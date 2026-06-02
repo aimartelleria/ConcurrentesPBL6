@@ -647,6 +647,9 @@
             <li class="menu-item" data-doc="gcp">
                 <button><i class="fa-solid fa-cloud"></i> Despliegue GCP/Docker</button>
             </li>
+            <li class="menu-item" data-doc="subir">
+                <button><i class="fa-solid fa-cloud-arrow-up"></i> Subir a Cloud (paso a paso)</button>
+            </li>
             <li class="menu-item" data-doc="resultados">
                 <button><i class="fa-solid fa-chart-line"></i> Guía y Resultados</button>
             </li>
@@ -713,30 +716,246 @@
     </main>
 
     <!-- Embedded Markdown Contents inside script blocks -->
+    <script type="text/markdown" id="doc-subir">
+# 🚀 Subir el servicio a Cloud — paso a paso
+
+Despliegue del contenedor Java (`rmi-server` ×3 + `rmi-client`) en la infra del equipo
+(3 nubes unidas por WireGuard). **Regla de oro:** la imagen se construye **una vez sin
+direcciones**; las direcciones del WireGuard se inyectan **al desplegar** (pasos 4-5), nunca
+se recompila para cambiar una dirección. Los **puertos no cambian**, solo los **hosts**.
+
+## Prerrequisitos
+- Infra provisionada (`webhardmon-infra`): VMs + WireGuard + Kafka + Schema Registry +
+  Cassandra + NiFi + túnel Cloudflare.
+- Acceso al registry de contenedores (Harbor local / Artifact Registry en GCP).
+
+## 1. (Antes) Construir y publicar las imágenes
+```bash
+docker build -t <REGISTRY>/rmi-server:latest -f server/Dockerfile . && docker push <REGISTRY>/rmi-server:latest
+docker build -t <REGISTRY>/rmi-client:latest -f client/Dockerfile . && docker push <REGISTRY>/rmi-client:latest
+```
+`<REGISTRY>` = Harbor (local) o `europe-southwest1-docker.pkg.dev/<PROJECT>/<REPO>` (GCP-A).
+
+## 2. (Una vez) Crear el esquema en Cassandra
+```bash
+cqlsh <cassandra-wg> -f db/schema-cassandra.cql   # keyspace webhardmon (mediciones/ordenadores/empresas)
+```
+
+## 3. (Una vez) Registrar el esquema Avro
+Registra `schemas/telemetry.avsc` en el Schema Registry para el subject `telemetry-value`
+(o deja que NiFi lo registre al publicar el primer mensaje).
+
+## 4. (Después) Desplegar los 3 nodos `rmi-server`
+Cada nodo en su VM, con **su nombre de WireGuard**:
+```bash
+docker run -d --name rmi-node-1 \
+  -e NODE_ID=node-01 -e HOST=node-01 -e PORT=6100 \
+  -e SEEDS="node-01:6100 node-02:6100 node-03:6100" \
+  -e JVM_OPTS="-Djava.rmi.server.hostname=node-01" \
+  -p 6100:6100 <REGISTRY>/rmi-server:latest
+# Repetir en node-02 y node-03 cambiando NODE_ID/HOST/hostname (PORT=6100 en cada VM).
+```
+> ⚠️ `java.rmi.server.hostname` DEBE ser el nombre WireGuard de esa VM, o los stubs RMI
+> apuntarán a direcciones inalcanzables entre nodos.
+
+## 5. (Después) Desplegar el `rmi-client`
+Apuntando a Kafka / Schema Registry / Cassandra del compañero (WireGuard):
+```bash
+docker run -d --name rmi-client \
+  -e KAFKA_BOOTSTRAP_SERVERS="<kafka-wg>:9092" \
+  -e SCHEMA_REGISTRY_URL="http://<sr-wg>:8085" \
+  -e CASSANDRA_CONTACT_POINTS="<cass-wg>:9042" \
+  -e CASSANDRA_LOCAL_DC="<dc-real>" \
+  -e CASSANDRA_KEYSPACE="webhardmon" \
+  <REGISTRY>/rmi-client:latest \
+  node-01:6100 node-02:6100 node-03:6100      # seeds RMI como argumentos
+```
+Plantilla completa de variables: **`.env.cloud.example`**.
+
+## 6. Conectar los agentes Go
+En cada PC de usuario (entran por el túnel Cloudflare, fuera del WireGuard):
+```bash
+./AgenteGo -mode=publisher -nifi-url="https://ingest.<zona>/telemetry" \
+  -codigo="<licencia>" -portatil="<nombre-ordenador>"
+```
+
+## 7. Verificar
+- Logs de `rmi-client`: `[OK] <equipo> stress=.. -> mediciones`.
+- En Cassandra: `SELECT * FROM webhardmon.mediciones LIMIT 5;`
+- Si el clúster RMI cae, los mensajes van a `telemetry.DLT` (no se pierden; at-least-once).
+
+> Si el despliegue lo hace Ansible, estos `docker run` equivalen a las tareas del
+> playbook: lo esencial es inyectar **las mismas variables de entorno**.
+
+## ¿Qué cambia respecto a local?
+| | Local | Cloud |
+|---|---|---|
+| Hosts (Kafka/SR/Cassandra/nodos) | `localhost` / nombres Docker | nombres **WireGuard** |
+| `java.rmi.server.hostname` | `node-1` | nombre WireGuard de la VM |
+| Agente → ingesta | `http://localhost:8081` | túnel Cloudflare `https://ingest.<zona>` |
+| Puertos y nombres lógicos (topic, keyspace) | — | **no cambian** |
+    </script>
     <script type="text/markdown" id="doc-readme">
-# Java RMI Cluster (P2P & Telemetría)
+# Java RMI Cluster (no single point of failure)
 
-Un clúster peer-to-peer dinámico programado en Java RMI. Cada nodo ejecuta su propio RMI registry independiente, descubriéndose y monitorizándose entre sí mediante un protocolo asíncrono descentralizado de **Gossip**. 
+> [!TIP]
+> **🚀 ¡DOCUMENTACIÓN CENTRALIZADA DISPONIBLE!**
+> Hemos unificado todas las guías, diagramas de arquitectura, referencias rápidas y resultados en un panel web interactivo premium. Abre el archivo **[index.html](index.html)** en tu navegador para ver la documentación interactiva con buscador, modo oscuro/claro y copia rápida de comandos.
 
-La arquitectura está diseñada para eliminar cualquier Punto Único de Fallo (SPOF). La caída de cualquier nodo o cliente no detiene el procesamiento general del sistema.
+A peer-to-peer RMI cluster. Every node runs its own RMI registry, members
+discover and track each other via gossip, and clients bootstrap from a
+list of seeds (any one alive is enough). Killing any subset short of
+"all of them" leaves the rest functional.
 
-## Componentes del Workspace
+## Files
 
-El sistema se compone de los siguientes subsistemas:
+```
 
-1. **`AgenteGo`** (en `AgenteGo-main/`): Agente recolector escrito en Go que toma métricas en tiempo real del sistema de ficheros, CPU y memoria, codificando el mensaje en **Avro** binario y empujándolo a Kafka de forma no bloqueante.
-2. **`Client`** (en `client/`): Aplicación puente basada en Java 21 Virtual Threads que consume los mensajes de Kafka, los guarda localmente simulando MinIO, y los despacha mediante RMI al clúster aplicando balanceo de carga Round-Robin y failover.
-3. **`ClusterNode`** (en `server/`): Nodos del clúster RMI P2P que reciben la métrica Avro, ejecutan el enriquecimiento de datos en un flujo ETL paralelo, calculan la métrica **Stress Score** y simulan el almacenamiento de los datos enriquecidos.
-4. **`Common`** (en `common/`): Interfaces RMI compartidas, la definición serializable de `Endpoint` y la abstracción del patrón `Task<T>`.
-5. **`Docker y GCP`**: Soporte nativo para contenedores Docker (`Dockerfile` en `server/` y `client/`), orquestación local con `docker-compose.yml` y guías para despliegue en Google Cloud Platform (GCE y GKE).
+  Endpoint.java         Serializable (host, port, nodeId); equality by host:port
+  Task.java             Generic computing task interface for compute engine
+  ComputeService.java   Remote interface: getNodeId, ping, executeTask, processTelemetry, gossip
+  ClusterNode.java      Self-registering, gossip-driven peer (Virtual Threads)
+  Client.java           Multi-seed bootstrap + round-robin + failover + Kafka consumer
+```
 
-## Diseño de Resiliencia y Despliegue
+## Design
 
-* **Sin coordinador central**: No existe un líder ni base de datos compartida para saber quién está vivo. Los nodos cotillean (*gossip*) entre ellos. El cliente arranca apuntando a una lista de semillas (*seeds*); si al menos una semilla está viva, obtiene la topología del clúster dinámicamente.
-* **Tombstones**: Cuando un nodo se cae por 3 rondas (~9 segundos), el clúster lo declara muerto y crea un *tombstone* de 30 segundos, impidiendo que cotilleos obsoletos lo reintroduzcan en la lista.
-* **Limpieza de Tombstone Directo**: Si el nodo caído se reinicia en el mismo puerto, su mensaje gossip inicial limpia el tombstone de forma inmediata, permitiendo un reingreso instantáneo.
-* **Failover en Cliente**: Si un nodo muere mientras el cliente le envía datos por RMI, la llamada devuelve una excepción de red. El cliente captura el fallo, selecciona el siguiente nodo vivo en la cola circular y reintenta el despacho de forma transparente y sin pérdida de datos.
-* **Contenedores y Nube**: El clúster y el cliente puente están adaptados para resolver dinámicamente sus hosts, semillas y brokers usando variables de entorno (`NODE_ID`, `HOST`, `PORT`, `SEEDS`, `KAFKA_BOOTSTRAP_SERVERS`), facilitando su ejecución idéntica en local y en la nube (GCP).
+**End-to-end telemetry pipeline.** A Go collector agent on each user machine
+measures CPU/RAM/disk/temperature and sends it via HTTP POST to an **Apache
+NiFi** ingestion gateway with license headers (`X-License-Code`, `X-Portatil`)
+— it no longer publishes to Kafka directly. NiFi validates the agent's license
+against MySQL (must be active), enriches with `empresa_id`/`nombre`, serializes
+to **Avro** using a **Schema Registry**, and routes valid records to **Kafka**
+(topic `telemetry`) while rejecting invalid ones. The Java `rmi-client`
+consumes from Kafka with a `KafkaAvroDeserializer`, computes each measurement's
+StressScore on the RMI cluster, and persists to **Cassandra**:
+
+```
+Go agent --HTTP--> NiFi (license check, enrich, Avro) --> Kafka (Avro/Schema Registry)
+        --> rmi-client (manual ack + DLT) --> RMI cluster (StressScore) --> Cassandra
+```
+
+The cluster computes `StressScore = 0.4*CPU + 0.4*RAM + 0.2*Disk (+20 if
+temperature > 80)`, clamped to `[0, 100]`. Storage is split between Cassandra
+(`mediciones`, `ordenadores`, `empresas`) and MySQL (application data:
+`empresa`, `administrador`, `usuario`, `licencia`, plus agent auth by license).
+The middleware is **Java RMI + Apache Kafka**.
+
+**No shared infrastructure.** Each node calls `LocateRegistry.createRegistry(port)`
+on its own port and binds itself locally as `"ComputeNode"`. There is no
+shared registry, no leader, no coordinator. The only thing every actor
+(node or client) needs is a list of *seed* addresses — at least one of
+which is reachable at bootstrap time.
+
+**Gossip-based membership.** Each node holds a map of known members keyed
+by `host:port`. Every 3 seconds it iterates the map, attempts a `gossip`
+RPC with each peer, and merges the returned view. The RPC carries the
+caller's `self` plus its view of the membership.
+
+**Failure detection.** Three consecutive failed gossip rounds against a
+peer (≈9 seconds of unreachability) eject the peer and record a 30-second
+tombstone on its address, suppressing re-introduction via stale gossip
+from third parties.
+
+**First-hand proof of life beats tombstones.** When a peer directly
+contacts us via gossip, its `self` parameter clears any tombstone we
+hold on it. This is what makes restarts work: a node that comes back at
+the same address rejoins immediately rather than waiting 30 seconds.
+Second-hand "I heard X is alive" gossip still respects tombstones.
+
+**Bootstrap.** If a node's member map ever drops to empty (lost partition,
+fresh start, every peer evicted), it re-adds its seed list and retries.
+A node can boot before any of its seeds are up — it'll keep trying.
+
+**Client.** The client takes a seed list, attempts `gossip(null, {})`
+against each in turn until one responds, caches the returned membership,
+and round-robins. Per-call `RemoteException` falls through to the next
+cached member; if every cached member fails, it refreshes from seeds
+and retries once.
+
+## What's *actually* SPoF-free here
+
+| Failure                          | Result                                               |
+|----------------------------------|------------------------------------------------------|
+| Any one node dies                | Survivors evict, keep serving. Client fails over.    |
+| Majority dies                    | The lone survivor still serves.                      |
+| A killed node restarts           | Direct contact clears its tombstone, instant rejoin. |
+| A seed in the client list is down| Client falls through to the next seed.               |
+| Network partition                | Each side keeps operating on the members it can see. |
+
+The only invariant you need is: **at boot time, at least one address
+in each actor's seed list resolves to a live node.** That's "any-of-N",
+not "this-specific-one", so list 3+ stable hosts and you're done.
+
+## Build and run
+
+```
+mvn clean install
+```
+
+Three peer nodes, each pointing at the other two:
+
+```
+java -cp build cluster.ClusterNode node-A localhost 1099 localhost:1100 localhost:1101
+java -cp build cluster.ClusterNode node-B localhost 1100 localhost:1099 localhost:1101
+java -cp build cluster.ClusterNode node-C localhost 1101 localhost:1099 localhost:1100
+```
+
+Client with the same three as seeds:
+
+```
+java -cp build cluster.Client localhost:1099 localhost:1100 localhost:1101
+```
+
+Kill any combination of nodes mid-stream. Within ~9 seconds the survivors
+log `Evicted (no response after 3 rounds): X` and drop the dead node.
+The client keeps going against whoever's left, refreshing its view if
+needed. Restart a node and it rejoins on first gossip; you'll see
+`Tombstone cleared by direct contact: X` on the peer that admits it back.
+
+## Real-world deployment notes
+
+- **Pin RMI's stub hostname.** RMI embeds the server's hostname in the
+  stub returned from a registry lookup. By default it uses
+  `InetAddress.getLocalHost()`, which is often unreachable from other
+  machines. Set `-Djava.rmi.server.hostname=<reachable-name-or-ip>` on
+  every node.
+- **Pin the export port for firewalls.** The constructor calls `super(0)`,
+  which exports the remote object on an anonymous port. For firewalled
+  networks, pass a fixed port to `super()` and open it.
+- **Seed list lives in config, not in a registry.** Put 3+ seeds (or
+  ideally a DNS A-record / SRV record returning multiple hosts) in your
+  client config. The seed list is the only "I have to know something"
+  step; everything after is discovered.
+- **Wire encryption is supported.** We use JVM SSL properties (e.g. `-Djavax.net.ssl.trustStore`) for encryption across untrusted networks. Ver `RUN_WITH_TLS.md`.
+- **Despliegue en cloud (GCP).** Todo el stack (Kafka + Client + 3 nodos) se sube con un solo comando: `cp .env.example .env` → editar → `./deploy-gcp.sh`. Ver `DEPLOY_GCP.md` para la guía completa (GCE turnkey y GKE).
+- **Local stack with docker compose.** The published images are `rmi-server`
+  (the `ClusterNode` peers) and `rmi-client` (the Kafka consumer). The core
+  stack — Kafka + Schema Registry + Cassandra + 3 RMI nodes + client — comes up
+  with `docker compose up`; layer the ingestion overlay (Apache NiFi + MySQL) on
+  top with `docker compose -f docker-compose.yml -f docker-compose.ingest.yml up`.
+
+## Known limits
+
+- **No indirect probing.** If node A can't reach node B but C can, A
+  will still evict B. Real gossip protocols (SWIM) ask K third parties
+  to probe before declaring dead. For a small LAN cluster this is
+  usually fine; on a flaky network you'd want to add it.
+- **Split-brain is silent.** If the cluster partitions, each side keeps
+  serving on the assumption the other side is dead. For a stateless
+  service like a Compute Engine, that's the right behaviour. For anything that
+  mutates state, you need a consensus protocol (Raft, Paxos) on top.
+- **`processTelemetry` consumes from Kafka.** Telemetry now flows over an
+  Apache Kafka topic (`telemetry`) using Avro with a Schema Registry. The
+  consumer uses **manual offset commit** (committed only after the batch is
+  processed) plus a **dead-letter topic** (`telemetry.DLT`), giving
+  at-least-once semantics. For each measurement the StressScore is computed on
+  the RMI cluster (round-robin + failover) and persisted to Cassandra
+  (keyspace `webhardmon`, table `mediciones`). Ensure Kafka, the Schema
+  Registry and Cassandra are reachable.
+- **O(N²) gossip.** Every node pings every other peer every round.
+  Fine up to dozens of nodes; beyond that, sample a random K peers per
+  round instead.
     </script>
 
     <script type="text/markdown" id="doc-iniciar-server">
@@ -895,53 +1114,73 @@ Al desplegar el servidor en red o depurar conexiones, te resultarán de gran uti
     <script type="text/markdown" id="doc-resultados">
 # 📖 Guía de Ejecución y Resultados del Cluster
 
-Este documento explica cómo funciona el flujo de datos entre el agente de monitoreo (Go), la cola de mensajería (RabbitMQ) y la malla de procesamiento distribuido (Java RMI), y detalla cómo interpretar los resultados obtenidos en las pruebas de ejecución y failover.
+Este documento explica cómo funciona el flujo de datos entre el agente de monitoreo (Go), el gateway de ingesta (Apache NiFi), el bus de mensajería (Apache Kafka) y la malla de procesamiento distribuido (Java RMI), y detalla cómo interpretar los resultados obtenidos en las pruebas de ejecución y failover.
 
 ---
 
 ## 🏗️ Flujo de Datos
 
 ```text
-┌────────────────┐          ┌──────────────┐          ┌──────────────┐
-│   Agente Go    │ ──Avro──►│    Kafka     │ ────────►│ Cliente Java │
-│ (Métricas CPU/ │          │   (Broker)   │          │ (RMI Bridge) │
-│  RAM/Disk/Temp)│          └──────────────┘          └──────┬───────┘
-└────────────────┘                                           │
-                                                  Balanceo / │ RMI
-                                                    Failover │
-                                                             ▼
-                                                    ┌────────────────┐
-                                                    │  Cluster Java  │
-                                                    │ (Virtual Th.)  │
-                                                    └────────────────┘
+┌────────────────┐   HTTP POST    ┌──────────────┐   Avro    ┌──────────────┐
+│   Agente Go    │ ──(X-License──►│  Apache NiFi │ ──+SR───► │ Apache Kafka │
+│ (Métricas CPU/ │     Code)      │  (Gateway de │           │  (topic      │
+│  RAM/Disk/Temp)│                │   ingesta)   │           │  "telemetry")│
+└────────────────┘                └──────┬───────┘           └──────┬───────┘
+                                  Valida  │ licencia (MySQL)         │
+                                  Enriquece (empresa_id, nombre)     │ KafkaConsumer
+                                  Serializa Avro + Schema Registry   │ (ack manual +
+                                  Rechaza inválidos                  │  dead-letter)
+                                                                     ▼
+                                                            ┌──────────────┐
+                                                            │ Cliente Java │
+                                                            │ (RMI Bridge) │
+                                                            └──────┬───────┘
+                                                       Balanceo /  │ RMI
+                                                         Failover  │ (round-robin)
+                                                                   ▼
+                                              ┌────────────────┐       ┌──────────────┐
+                                              │  Cluster Java  │       │  Cassandra   │
+                                              │ (Virtual Th.)  │       │ (mediciones) │
+                                              └────────────────┘       └──────────────┘
+                                                  StressScore    ──persiste──►
 ```
 
-1. **Agente Go**: Inspecciona el sistema operativo usando `gopsutil` en intervalos regulares, genera un registro binario serializado con el esquema **Avro**, y lo publica en el topic `telemetry` de Kafka.
-2. **Cliente Java**: Está permanentemente suscrito al topic `telemetry` de Kafka. En cuanto recibe una métrica binaria en formato Avro, actúa como un puente ("bridge") y la despacha al cluster Java utilizando llamadas RMI.
-3. **Nodos del Cluster Java (`ClusterNode`)**:
-   - Cada nodo hospeda su propio registro RMI de forma distribuida (sin un servidor central).
+1. **Agente Go (collector)**: Inspecciona el sistema operativo usando `gopsutil` en intervalos regulares (CPU/RAM/Disco/Temperatura) y envía cada lectura mediante **HTTP POST** al gateway de ingesta **Apache NiFi**, incluyendo cabeceras de licencia (`X-License-Code` = código y `X-Portatil`). Ya no publica directamente en ningún broker.
+2. **Apache NiFi (gateway de ingesta)**: Valida la licencia recibida contra **MySQL** (debe estar activa), enriquece el registro con `empresa_id` y `nombre`, serializa la métrica a **Avro** apoyándose en el **Schema Registry**, enruta los mensajes válidos al topic de **Kafka** y rechaza los inválidos.
+3. **Apache Kafka (topic `telemetry`)**: Actúa como bus asíncrono entre la ingesta y el procesamiento. Los mensajes viajan en **Avro** con gobierno de esquema vía **Schema Registry** (puerto 9092 interno / 9094 externo).
+4. **Cliente Java (`rmi-client`)**: Un `KafkaConsumer` con `KafkaAvroDeserializer` consume el topic `telemetry`. Usa **ACK manual** (hace commit del offset tras procesar correctamente el lote) y una cola **dead-letter** (`telemetry.DLT`), garantizando semántica *at-least-once*. Actúa como puente ("bridge") despachando cada métrica al cluster Java mediante llamadas **RMI**.
+5. **Nodos del Cluster Java (`ClusterNode`)**:
+   - Cada nodo hospeda su propio registro RMI de forma distribuida (P2P, sin un servidor central ni SPOF).
    - Utilizan un protocolo de **Gossip (chisme)** periódico en segundo plano para informarse mutuamente qué nodos están vivos o cuáles han caído (evicción).
-   - Al recibir el paquete Avro, realizan un proceso de enriquecimiento (ETL) y calculan un **Stress Score** en paralelo mediante **Virtual Threads**.
+   - Al recibir el paquete Avro, calculan un **Stress Score** en paralelo mediante **Virtual Threads** (Java 21).
+6. **Persistencia (Cassandra)**: Una vez calculado el Stress Score, el cliente **persiste la medición en Cassandra** (keyspace `webhardmon`, tabla `mediciones`). MySQL queda como base de datos de la aplicación (empresa, administrador, usuario, licencia) y soporte de autenticación por licencia.
 
 ---
 
 ## 🛠️ Ajustes Realizados para la Integración
 
-1. **Topic Unificado**: Se configuró `SubscriberKafka.go` para que publique datos en el topic `telemetry` de Kafka, sincronizándolo con el topic que consume el `Client.java`.
-2. **Compatibilidad de Compilación**: Se redujo el requerimiento de versión en `go.mod` (`go 1.22+`) y se ejecutó `go mod tidy` para garantizar que compile sin errores en entornos estándares.
+1. **Ingesta vía NiFi + Kafka**: El agente Go (`SubscriberKafka.go`) dejó de publicar directamente en un broker y ahora envía las métricas por **HTTP POST a Apache NiFi**, que valida la licencia, serializa a Avro con Schema Registry y enruta a **Kafka** (topic `telemetry`). El `Client.java` consume ese topic mediante un `KafkaConsumer`.
+2. **Fiabilidad de la entrega**: El consumidor implementa **ACK manual** (commit tras procesar el lote) y **dead-letter** (`telemetry.DLT`), logrando entrega *at-least-once* y aislando los mensajes problemáticos.
+3. **Gobierno del esquema**: El **Schema Registry** centraliza y versiona el esquema Avro compartido entre NiFi (productor) y el cliente Java (consumidor).
+4. **Compatibilidad de Compilación**: Se redujo el requerimiento de versión en `go.mod` (`go 1.22+`) y se ejecutó `go mod tidy` para garantizar que compile sin errores en entornos estándares.
 
 ---
 
 ## 🚀 Cómo iniciar el sistema en local
 
-### 1. Iniciar Kafka
-Levantar el broker en Docker:
+### 1. Levantar el stack con Docker Compose
+El **core** del sistema (Kafka + Schema Registry + Cassandra + los 3 nodos RMI + el cliente) se levanta con un único comando:
 ```bash
-docker compose up -d kafka
+docker compose up -d
 ```
+Para añadir el **overlay de ingesta** (Apache NiFi + MySQL), combina ambos ficheros:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.ingest.yml up -d
+```
+Con esto quedan operativos el bus de Kafka (topic `telemetry`), el Schema Registry, Cassandra (keyspace `webhardmon`), los nodos del clúster RMI, el cliente consumidor y el gateway NiFi validando licencias contra MySQL.
 
-### 2. Arrancar los Nodos Java (Cluster)
-Compila el proyecto Java:
+### 2. (Opcional) Arrancar los Nodos Java manualmente
+Si prefieres ejecutarlos fuera de contenedores, compila el proyecto Java:
 ```bash
 mvn clean package
 ```
@@ -956,16 +1195,17 @@ java -cp "server/target/server-1.0-SNAPSHOT.jar" cluster.ClusterNode node-2 loca
 # Terminal 3 (Nodo 3)
 java -cp "server/target/server-1.0-SNAPSHOT.jar" cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
 ```
-
-### 3. Arrancar el Cliente Java (Consumidor/Puente)
+Y el cliente Java (consumidor de Kafka / puente RMI):
 ```bash
 java -cp "client/target/client-1.0-SNAPSHOT.jar" cluster.Client localhost:6100 localhost:6101 localhost:6102
 ```
 
-### 4. Ejecutar el Agente Go
+### 3. Ejecutar el Agente Go
+El agente envía las métricas al gateway NiFi (modo *publisher*), incluyendo el código de licencia y el identificador del portátil:
 ```bash
-go run AgenteGo-main/SubscriberKafka.go AgenteGo-main/ConsumerKafka.go AgenteGo-main/metrics_shared.go -mode=publisher -kafka-brokers="localhost:9094"
+go run . -mode=publisher -nifi-url=http://localhost:8080/contentListener -codigo=TU_CODIGO_LICENCIA -portatil=PC-01
 ```
+> Ejecuta el comando desde el directorio `AgenteGo-main/` (donde reside `SubscriberKafka.go`). Ajusta `-nifi-url`, `-codigo` y `-portatil` a tu entorno.
 
 ---
 
@@ -975,11 +1215,11 @@ go run AgenteGo-main/SubscriberKafka.go AgenteGo-main/ConsumerKafka.go AgenteGo-
 El Agente Go recopila las métricas de hardware del sistema:
 ```text
 Iniciando servicio de recolección métricas en segundo plano...
-Se enviarán métricas a Kafka cada 5 minutos.
+Se enviarán métricas a NiFi/Kafka cada 5 minutos.
 [2026-05-20 08:42:58] Datos recolectados normales: {Timestamp:1779266578 CPUPercent:1.182327318355726 CPUModel:12th Gen Intel(R) Core(TM) i7-12650H RAMPercent:23.011672656562755 RAMTotal:8175046656 DiskPercent:9.89245871010225 DiskTotal:1081101176832 Temp:<nil>}
-[2026-05-20 08:42:58] datos binarios enviados correctamente por Kafka
+[2026-05-20 08:42:58] datos enviados correctamente a NiFi/Kafka
 ```
-* **Interpretación**: Indica que el recolector de Go accedió al hardware del host (o contenedor), serializó la información en formato Avro binario (~78 bytes debido a las cadenas y longs adicionales) y la encoló exitosamente en Kafka.
+* **Interpretación**: Indica que el recolector de Go accedió al hardware del host (o contenedor) y envió la lectura por HTTP POST a NiFi, que validó la licencia, la serializó en formato Avro (con Schema Registry) y la publicó exitosamente en el topic `telemetry` de Kafka.
 
 ### Procesamiento y Enriquecimiento (Java)
 El nodo que recibe la llamada RMI ejecuta el pipeline ETL y visualiza la información formateada:
@@ -1076,7 +1316,7 @@ Esta prueba distribuye **150 tareas del pipeline de Stress Score (Modelo a Trozo
   * Realiza **detección de anomalías por Z-Score** (umbral > 2σ) y calcula un score final compuesto ponderando los estadísticos con un factor multiplicativo por anomalías detectadas.
   * Luego, ejecuta un bloqueo `Thread.sleep(40)` (40ms) que emula la latencia de almacenamiento distribuido e I/O de red.
 * **Proceso de ejecución**:
-  1. Asegúrate de tener Kafka iniciado (`docker compose up -d kafka`).
+  1. Asegúrate de tener el stack base levantado (`docker compose up -d`), que incluye Kafka, Schema Registry y Cassandra.
   2. Levanta entre 1 y 3 nodos de cálculo en terminales independientes:
      - **Terminal del Nodo 1**:
        ```bash
@@ -1119,7 +1359,7 @@ Es como una red de computadoras donde cada una es independiente, pero todas se c
 
 ## 🏗️ Arquitectura del Sistema
 
-```text
+```
 ┌─────────────────────────────────────────────────────────────┐
 │                         CLIENTE                             │
 │  (Bootstrap → Round-Robin → Failover)                      │
@@ -1144,12 +1384,71 @@ Es como una red de computadoras donde cada una es independiente, pero todas se c
 
 ---
 
+## 🌐 Pipeline Extremo a Extremo (WebHardMon)
+
+El cluster RMI es el motor de cómputo dentro de un pipeline de telemetría más amplio. El flujo completo es:
+
+```
+┌──────────────┐   HTTP POST     ┌──────────────────────┐   Avro     ┌──────────────┐
+│  Agente Go   │  X-License-Code │   Apache NiFi        │  + Schema  │ Apache Kafka │
+│ (collector)  │ ──────────────► │  (gateway ingesta)   │ ─Registry─►│ topic        │
+│ CPU/RAM/disco│  X-Portatil     │ valida licencia      │  Registry  │ "telemetry"  │
+│ temperatura  │                 │ vs MySQL (activa),   │            │ 9092/9094    │
+└──────────────┘                 │ serializa a Avro,    │            └──────┬───────┘
+                                  │ enriquece empresa_id │                   │
+                                  │ y nombre_ordenador,  │                   │ KafkaConsumer
+                                  │ enruta válidos /     │                   │ (Avro deser.)
+                                  │ rechaza inválidos    │                   ▼
+                                  └──────────────────────┘            ┌──────────────┐
+                                                                      │ Client Java  │
+                          ┌───────────────────────────────────────── │ (rmi-client) │
+                          │  RMI: StressScore (round-robin + failover)│ ack MANUAL + │
+                          ▼                                           │ dead-letter  │
+                  ┌────────────────────────┐                         │ (telemetry.  │
+                  │  Cluster RMI x3         │                         │  DLT)        │
+                  │  (ClusterNode, gossip,  │                         └──────┬───────┘
+                  │  Virtual Threads J21)   │                                │ persiste
+                  │  StressTask:            │                                ▼
+                  │  0.4*CPU+0.4*RAM+0.2*Dco│                         ┌──────────────┐
+                  │  (+20 si temp>80)       │                         │  Cassandra   │
+                  │  acotado a [0,100]      │                         │ keyspace     │
+                  └────────────────────────┘                         │ webhardmon   │
+                                                                      │ (mediciones) │
+                                                                      └──────────────┘
+```
+
+### Componentes del pipeline
+
+1. **Agente Go (collector)**: mide CPU/RAM/disco/temperatura. Ya **no** publica directo a Kafka: hace `HTTP POST` a un gateway Apache NiFi con cabeceras de licencia (`X-License-Code` = código, `X-Portatil`).
+2. **Apache NiFi (gateway de ingesta)**: valida la licencia del agente contra la BD de aplicación en **MySQL** (debe estar activa), serializa a **Avro** usando un **Schema Registry**, enruta los válidos a Kafka y rechaza los inválidos. Enriquece con `empresa_id` y `nombre` (`nombre_ordenador`).
+3. **Apache Kafka** (topic `telemetry`, 9092 interno / 9094 externo): bus asíncrono. Avro en el cable con **Schema Registry** (Confluent/Apicurio) como fuente única del esquema.
+4. **Client Java (rmi-client)**: `KafkaConsumer` con `KafkaAvroDeserializer`. **ACK MANUAL** (commit del offset solo tras procesar el lote) + **DEAD-LETTER** (topic `telemetry.DLT`) ⇒ entrega **at-least-once**. Calcula el StressScore en el cluster por RMI y **persiste en Cassandra** (keyspace `webhardmon`, tabla `mediciones`).
+5. **Cluster RMI (rmi-server x3)**: P2P sin punto único de fallo, descubrimiento por gossip, **Virtual Threads (Java 21)**. Ejecuta `StressTask`.
+6. **Almacenamiento**: **Cassandra** (`mediciones` = serie temporal, `ordenadores` = inventario, `empresas`) y **MySQL** = BD de la aplicación (empresa, administrador, usuario, licencia) y autenticación de agentes por licencia.
+
+### Middleware
+
+- **Java RMI**: cómputo distribuido (cálculo del StressScore en el cluster).
+- **Apache Kafka**: mensajería asíncrona (topic `telemetry`, grupo `telemetry_java_consumers`).
+
+> El proyecto **ya no usa RabbitMQ/AMQP**. Toda la mensajería pasa por Kafka.
+
+### Fiabilidad y seguridad
+
+- **TLS opcional** en RMI.
+- **Autenticación de agentes por licencia** (`codigo`) verificada en NiFi contra MySQL.
+- **Ack manual + dead-letter** en Kafka.
+- **Failover** RMI (round-robin + reintentos).
+- **Gobierno de esquema** con Schema Registry.
+
+---
+
 ## 📁 Explicación de Cada Archivo
 
 ### 1. **Endpoint.java** 🗺️
 **¿Qué es?** Una clase que representa la identidad de red de un nodo.
 
-```text
+```
 ┌──────────────────┐
 │ Endpoint         │
 ├──────────────────┤
@@ -1164,7 +1463,7 @@ Es como una red de computadoras donde cada una es independiente, pero todas se c
 - `addr()`: Devuelve "host:port" como clave única
 - Implementa `Serializable` para poder enviarse por RMI
 
-**Analogía**: Es como el DNI de una persona, pero para un nodo del cluster.
+**Analogy**: Es como el DNI de una persona, pero para un nodo del cluster.
 
 ---
 
@@ -1199,7 +1498,7 @@ Interface ComputeService (Remote)
 
 **Estructura interna:**
 
-```text
+```
 ┌────────────────────────────────────────┐
 │         ClusterNode (Nodo)             │
 ├────────────────────────────────────────┤
@@ -1230,11 +1529,11 @@ Una marca que dice "este nodo estaba muerto". Evita que otros nodos sigan intent
 ---
 
 ### 4. **Client.java** 👤
-**¿Qué es?** El programa que USA el clúster. Es quien pide operaciones.
+**¿Qué es?** El programa que USA el cluster. Es quien pide operaciones.
 
 **Flujo de trabajo:**
 
-```text
+```
 1. Bootstrap
    ├─ "Dame la lista de nodos conocidos"
    └─ Solo necesita 1 nodo respondiendo
@@ -1253,37 +1552,280 @@ Una marca que dice "este nodo estaba muerto". Evita que otros nodos sigan intent
 ```
 
 **¿Qué simula el cliente?**
-- Un puente (consumidor) que recibe datos desde Kafka y los pasa al cluster.
-- En el `main()` se conecta a Kafka y consume del topic `telemetry`.
-- Por cada mensaje Avro recibido, hace: `processTelemetry(payload)` a un nodo del cluster.
+- Un puente (consumidor) que recibe datos desde Apache Kafka y los pasa al cluster.
+- En el `main()` se conecta a Kafka (usando Virtual Threads) como `KafkaConsumer` con `KafkaAvroDeserializer` (Schema Registry), consumiendo del topic `telemetry` dentro del grupo `telemetry_java_consumers`.
+- Por cada mensaje Avro recibido, calcula el StressScore por RMI (`processTelemetry(payload)` en un nodo del cluster) y persiste el resultado en Cassandra (keyspace `webhardmon`, tabla `mediciones`).
+- Garantía **at-least-once**: ACK MANUAL (commit del offset solo tras procesar el lote) + DEAD-LETTER (topic `telemetry.DLT`) para los mensajes que fallan.
 - Simula: **Ingesta asíncrona, balanceo de carga, recuperación de fallos, y descubrimiento dinámico**.
 
 ---
 
-## 🚀 Implementación del Patrón "Compute Engine"
+## 🔄 Flujo Completo: Paso a Paso
 
-Para garantizar la extensibilidad de la malla, el clúster soporta la inyección dinámica de código a través del patrón **Compute Engine**:
+### Escenario: Cliente quiere procesar telemetría `processTelemetry(payload)`
 
-### Interfaz de Tarea (`Task.java`):
-Define una unidad de trabajo arbitraria que el cliente envía empaquetada.
-```java
-package cluster;
-import java.io.Serializable;
-
-public interface Task<T> extends Serializable {
-    T execute();
-}
+```
+┌─────────────────────────────────────────────────────────────┐
+│ CLIENT (KafkaConsumer del topic "telemetry", Avro)           │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                    ¿Conozco miembros?
+                     │         │
+                    NO        SÍ
+                     │         │
+                [REFRESH]   [CACHE]
+                     │         │
+              Llamo a seed    Intento nodo siguiente
+              (NODE-1)        (NODE-2)
+                     │         │
+              "Dame lista"  "Procesa telemetría (Avro)"
+                     │         │
+              ✓ Responde    ✓ Responde y calcula StressScore
+                     │         │
+             Guardo lista    Persiste en Cassandra +
+             [members]       commit MANUAL del offset
+                     │        (fallo → topic telemetry.DLT)
+            Siguiente mensaje
+            round-robin
+            (NODE-3)
 ```
 
-### Ejecución Agnóstica en el Servidor:
-`ClusterNode` recibe la tarea y la ejecuta localmente en sus hilos sin conocer los detalles de implementación previos, devolviendo el resultado genérico al cliente:
-```java
-@Override
-public <T> T executeTask(Task<T> t) {
-    System.out.printf("[%s] executing remote task...%n", self.nodeId);
-    return t.execute();
-}
+---
+
+## 📊 Escenarios de Fallos y Recuperación
+
+### Escenario 1: Un nodo se cae
+
 ```
+Antes:  NODE-1 ✓  NODE-2 ✓  NODE-3 ✓
+                    ↓ (cae)
+Después: NODE-1 ✓  NODE-2 ✗  NODE-3 ✓
+
+Cliente:
+- Intenta NODE-2: FALLA ❌
+- Automáticamente intenta NODE-3: OK ✓
+- El cliente NO se da cuenta del fallo (transparente)
+- Gossip marca NODE-2 con tombstone por 30s
+```
+
+### Escenario 2: Partición de red (cliente aislado)
+
+```
+Antes:  [CLIENT] ←→ NODE-1 ✓
+               ↓ (corte de red)
+Después: [CLIENT] ✗ NODE-1 ✓
+
+Cliente intenta processTelemetry():
+- Intenta NODE-1: TIMEOUT ❌
+- Refresca lista de miembros: FALLA (sin conexión)
+- Lanza excepción: "All members failed even after a refresh"
+- Al no hacer commit del offset (ACK MANUAL), Kafka re-entregará el mensaje (at-least-once)
+```
+
+### Escenario 3: Nodo se reinicia
+
+```
+NODE-1: MUERTO (tombstone 30s) ✓
+           ↓ (se reinicia)
+NODE-1: VIVO (en la misma dirección IP:puerto)
+
+Gossip recibe:
+- contacto directo de NODE-1 → Borra tombstone INMEDIATAMENTE
+- NODE-1 se reúne al cluster sin esperar 30s
+```
+
+---
+
+## ⚙️ Configuración y Parámetros Clave
+
+| Parámetro | Valor | Significado |
+|-----------|-------|-------------|
+| `SERVICE_NAME` | `"ComputeNode"` | Nombre bajo el cual se registra en RMI |
+| `MAX_FAILURES` | `3` | Intentos de gossip fallidos antes de evictar |
+| `TOMBSTONE_TTL_MS` | `30,000` | 30 segundos que dura la marca de "muerto" |
+| `GOSSIP_INTERVAL_S` | `3` | Cada 3 segundos se ejecuta gossip |
+| Default RMI port | `6100+` | Cada nodo usa su puerto |
+
+---
+
+## 🚀 ¿Cómo se ejecuta?
+
+### Terminal 1: Inicia NODE-1
+```bash
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101 localhost:6102
+```
+
+### Terminal 2: Inicia NODE-2
+```bash
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-2 localhost 6101 localhost:6100 localhost:6101 localhost:6102
+```
+
+### Terminal 3: Inicia NODE-3
+```bash
+java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
+```
+
+### Terminal 4: Ejecuta el cliente
+```bash
+java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102
+```
+
+---
+
+## 🎓 Preguntas Frecuentes
+
+### P1: ¿Por qué necesita "semillas" (seeds)?
+**R:** El bootstrap es el problema. Cuando un cliente arranca, no conoce a ningún nodo.
+Las semillas son direcciones conocidas del cluster que dice "prueba en estas direcciones".
+Si al menos UNA responde, el cliente obtiene la lista completa de todos.
+
+### P2: ¿Qué es RMI?
+**R:** Remote Method Invocation. Permite llamar métodos en objetos de otras máquinas Java como si estuvieran locales.
+```java
+// En máquina remota
+Registry reg = LocateRegistry.getRegistry("localhost", 6100);
+ComputeService stub = (ComputeService) reg.lookup("ComputeNode");
+stub.processTelemetry(payload);  // ¡Llamada remota!
+```
+
+### P3: ¿Qué pasa si TODOS los nodos se caen?
+**R:** El cluster está muerto. El cliente lanzará excepción.
+Pero si se reinician, se recuperan automáticamente porque cada nodo re-añade sus semillas.
+
+### P4: ¿Cómo detecta que un nodo está muerto?
+**R:** Por timeout de RMI (3 fallos = ~9 segundos de silencio) + gossip periódico.
+No es un heartbeat explícito, sino por falta de respuesta en gossip.
+
+### P5: ¿Por qué se llama "anti-entropy" al gossip?
+**R:** Porque el gossip reduce la entropía (desorden) del sistema.
+Todos los nodos gradualmente convergen a la misma vista de membresía.
+
+### P6: ¿Qué es "round-robin"?
+**R:** Una técnica de balanceo: el cliente alterna entre nodos en orden circular.
+```
+Llamada 1 → NODE-1
+Llamada 2 → NODE-2
+Llamada 3 → NODE-3
+Llamada 4 → NODE-1 (vuelta al inicio)
+```
+
+### P7: ¿Puede haber "split-brain" (dos clusters separados)?
+**R:** SÍ. Si la red se particiona, cada parte funciona independientemente.
+Cuando se reconecta, habrá un período de convergencia. Este diseño NO resuelve split-brain.
+
+### P8: ¿Por qué los tombstones duran 30 segundos?
+**R:** Balance entre:
+- **Corto**: Rejoin rápido si reinicia
+- **Largo**: Evita re-introducir nodos muertos por un tiempo
+
+---
+
+## 📈 Ventajas y Limitaciones
+
+### ✅ Ventajas
+- **Sin punto único de fallo** (SPOF)
+- **Escalable**: Agregar nodos es trivial
+- **Resiliente**: Aguanta caídas parciales
+- **Simple**: Gossip es elegante y probado (BitTorrent, Cassandra, etc.)
+
+### ❌ Limitaciones
+- **Sin garantías de consistencia** (eventual consistency)
+- **No resuelve split-brain** (particiones de red)
+- **RMI es lento** (Java puro, sin protobuf/gRPC)
+- **Encriptación vía TLS**: Implementada vía properties JVM (ver `RUN_WITH_TLS.md`)
+- **Gossip periódico**: Detección de fallos toma tiempo
+
+---
+
+## 🔍 Flujo de Código: Cliente → Nodo
+
+```
+CLIENT.processTelemetry(payload)
+  ↓
+¿members está vacío? → SÍ: refresh() → GOSSIP con seed
+  ↓ NO
+Selecciona nodo con round-robin (cursor)
+  ↓
+RMI: stub.processTelemetry(payload)  [TIMEOUT/EXCEPTION]
+  ↓
+¿Hay más nodos? → SÍ: Intenta siguiente
+                 NO: refresh() + retry
+  ↓
+✓ Devuelve sqrt(1.5) * 2 = 2.449
+```
+
+---
+
+## 💡 Caso de Uso Real
+
+Imagina un sistema de **procesamiento de imágenes distribuido**:
+
+```
+┌──────────────────┐
+│  Servidor Web    │ (Cliente)
+│  (recibe fotos)  │
+└──────────────────┘
+         ↓
+    processTelemetry(foto)
+         ↓
+    ┌──────┬──────┬──────┐
+    ↓      ↓      ↓      ↓
+ [NODE-1] [NODE-2] [NODE-3] (Procesan en paralelo)
+   Filter  Resize  Compress
+    ↓      ↓      ↓
+    └──────┬──────┘
+         ↓
+    Foto procesada
+    (devuelve a web)
+```
+
+Si se cae NODE-2, la web sigue funcionando usando NODE-1 y NODE-3.
+
+---
+
+## 📚 Resumen Visual
+
+```
+┌─────────────────────────────────────────────────────┐
+│ CLUSTER RMI - ARQUITECTURA GENERAL                 │
+├─────────────────────────────────────────────────────┤
+│                                                     │
+│  Componentes (cluster RMI):                        │
+│  1. Endpoint     → Identidad de red (IP:puerto)   │
+│  2. ComputeService → Interfaz remota              │
+│  3. ClusterNode  → Servidor con gossip             │
+│  4. Client       → KafkaConsumer + RMI + Cassandra │
+│                                                    │
+│  Pipeline (extremo a extremo):                     │
+│  • Agente Go    → collector (HTTP a NiFi)          │
+│  • Apache NiFi  → valida licencia + Avro           │
+│  • Schema Reg.  → fuente única del esquema Avro    │
+│  • Apache Kafka → bus async (topic "telemetry")    │
+│  • Cassandra    → mediciones (keyspace webhardmon) │
+│  • MySQL        → BD app + licencias de agentes    │
+│                                                    │
+│  Mecanismos:                                       │
+│  • RMI Registry     → Directorio de servicios     │
+│  • Gossip Protocol  → Descubrimiento de nodos     │
+│  • Tombstones       → Marca de nodos muertos      │
+│  • Round-robin      → Balanceo de carga           │
+│  • Failover         → Recuperación automática      │
+│  • Virtual Threads  → Concurrencia (Java 21)       │
+│  • Ack manual + DLT → Entrega at-least-once        │
+│                                                    │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🎬 Conclusión
+
+Este proyecto es un **ejemplo de arquitectura distribuida sin SPOF**.
+- **Real world**: Cassandra, Dynamo, Consul usan similares
+- **Teaching**: Perfecta para aprender clustering
+- **Resilience**: Explica por qué los sistemas nube son redundantes
+
+¡El cliente simula un usuario/aplicación que necesita ejecutar tareas en un cluster donde cualquier nodo puede fallar en cualquier momento!
     </script>
 
     <script type="text/markdown" id="doc-completa">
@@ -1295,13 +1837,15 @@ Este documento proporciona una visión unificada, profunda y definitiva sobre la
 
 ## 1. 🎯 Visión General
 
-El sistema es una **red distribuida de computación *Peer-to-Peer* (P2P) y procesamiento de telemetría sin Punto Único de Fallo (SPOF)**. Su propósito es recoger datos de hardware (telemetría), encolarlos para evitar pérdida de datos en picos de carga, y distribuirlos a un enjambre de nodos de computación que se autodescubren mediante un protocolo *Gossip*. 
+El sistema es una **red distribuida de computación *Peer-to-Peer* (P2P) y procesamiento de telemetría sin Punto Único de Fallo (SPOF)**. Su propósito es recoger datos de hardware (telemetría), validarlos en una pasarela de ingesta, encolarlos para evitar pérdida de datos en picos de carga, distribuirlos a un enjambre de nodos de computación que se autodescubren mediante un protocolo *Gossip* y persistir el resultado.
 
 A nivel funcional, el sistema:
-1. **Recopila** métricas en máquinas externas.
-2. **Serializa y encola** de forma altamente eficiente.
-3. **Distribuye** el trabajo o telemetría a través de una malla P2P de nodos Java.
-4. **Resiste** caídas de nodos, redireccionando el tráfico automáticamente de manera distribuida.
+1. **Recopila** métricas en máquinas externas (agentes Go).
+2. **Valida y gobierna la ingesta** mediante un *gateway* Apache NiFi que autentica por licencia contra la BD de la aplicación (MySQL) y serializa a Avro con Schema Registry.
+3. **Serializa y encola** de forma altamente eficiente en Apache Kafka.
+4. **Distribuye** el cálculo (StressScore) a través de una malla P2P de nodos Java vía RMI.
+5. **Persiste** las mediciones enriquecidas en Cassandra.
+6. **Resiste** caídas de nodos, redireccionando el tráfico automáticamente de manera distribuida, con *ack* manual y *dead-letter* en el consumidor para garantía *at-least-once*.
 
 ---
 
@@ -1310,30 +1854,40 @@ A nivel funcional, el sistema:
 La arquitectura está formada por varios subsistemas especializados que operan de forma desacoplada:
 
 ```text
-┌────────────────┐     Avro     ┌──────────────────┐
-│   Agente Go    ├─────────────►│      Kafka       │ (Topic de Ingesta)
-│  (Data Source) │              │     (Broker)     │
-└────────────────┘              └────────┬─────────┘
-                                         │ Consumo
-                                         ▼
+┌────────────────┐  HTTP   ┌──────────────────┐  Avro + Schema Registry  ┌──────────────────┐
+│   Agente Go    ├────────►│   NiFi (gateway) ├─────────────────────────►│      Kafka       │
+│  (Data Source) │  POST   │ valida licencia  │     PublishKafka         │  topic telemetry │
+└────────────────┘         │  (MySQL: app DB) │                          └────────┬─────────┘
+                           └──────────────────┘                                   │ Consumo
+                                                                                  ▼
                  ┌────────────────────────────────────────────────────────┐
-                 │                      CLIENTE JAVA                      │
-                 │   (Consumidor Kafka + RMI Bootstrap + Load Balancer)   │
+                 │                  CLIENTE JAVA (rmi-client)             │
+                 │  KafkaConsumer (KafkaAvroDeserializer, ack manual +    │
+                 │  dead-letter telemetry.DLT) + RMI Bootstrap + LB       │
                  └────────────────────────────────────────────────────────┘
                            │                  │                  │
                 RMI / TLS  │                  │ RMI / TLS        │ RMI / TLS
                            ▼                  ▼                  ▼
                     ┌─────────┐        ┌─────────┐        ┌─────────┐
-    Protocolo       │  NODO 1 │◄──────►│  NODO 2 │◄──────►│  NODO 3 │
+    Protocolo       │  NODO 1 │◄──────►│  NODO 2 │◄──────►│  NODO 3 │   (rmi-server x3)
     Gossip P2P      │(Compute)│        │(Compute)│        │(Compute)│
     (Membresía)     └─────────┘        └─────────┘        └─────────┘
+                           │                  │                  │
+                           └──────────────────┴──────────────────┘
+                                              ▼
+                                    ┌───────────────────┐
+                                    │     Cassandra     │  keyspace webhardmon
+                                    │ (mediciones, etc.)│  tabla mediciones
+                                    └───────────────────┘
 ```
 
 ### Componentes Clave:
-1. **Source (Agente Go):** Obtiene datos del sistema operativo y genera cargas útiles (*payloads*).
-2. **Buffer (Kafka):** Desacopla la emisión de datos de la capacidad y velocidad de procesamiento del cluster de Java.
-3. **Edge / Entrypoint (Cliente Java):** Actúa como un puente. Escucha mensajes de Kafka y los balancea (Round-Robin tolerante a fallos) enviándolos por RMI al cluster.
-4. **Compute Grid (Servidores ClusterNode):** Malla de nodos que ejecutan el motor de cálculo genérico (`Task`) o procesan telemetría localmente. Mantienen su estado (quién está vivo/muerto) "cotilleando" (Gossip) entre sí.
+1. **Source (Agente Go):** Obtiene datos del sistema operativo y genera cargas útiles (*payloads*), que envía por HTTP al gateway de ingesta.
+2. **Gateway de ingesta (Apache NiFi):** Se sitúa entre los agentes y Kafka. Autentica a cada collector por su **licencia** contra la BD de la aplicación (MySQL: tabla `licencia`, `activa = 1`), serializa a Avro gobernado por Schema Registry y publica en Kafka. Las licencias inactivas o inexistentes se rechazan con **HTTP 401**. (Detalle completo en `NIFI_GATEWAY.md`.)
+3. **Buffer (Kafka):** Desacopla la emisión de datos de la capacidad y velocidad de procesamiento del cluster de Java. El topic `telemetry` transporta Avro con Schema Registry.
+4. **Edge / Entrypoint (Cliente Java, `rmi-client`):** Actúa como un puente. Consume de Kafka con `KafkaAvroDeserializer`, calcula el StressScore vía RMI (balanceo Round-Robin tolerante a fallos) y persiste en Cassandra. Usa **ack manual** (`commitSync` con `enable.auto.commit=false`) y **dead-letter** (`telemetry.DLT`) para garantía *at-least-once*.
+5. **Compute Grid (Servidores ClusterNode, `rmi-server` x3):** Malla de nodos que ejecutan el motor de cálculo genérico (`Task`), en particular `StressTask`. Mantienen su estado (quién está vivo/muerto) "cotilleando" (Gossip) entre sí.
+6. **Almacenamiento:** **Cassandra** (keyspace `webhardmon`: tablas `mediciones`, `ordenadores`, `empresas`) para la serie temporal de telemetría, y **MySQL** como BD de la aplicación (empresa, administrador, usuario, licencia; autenticación de los agentes por licencia).
 
 ---
 
@@ -1365,9 +1919,20 @@ El bróker de mensajería distribuido.
 El `AgenteGo` se encarga de extraer la métrica e iniciar el ciclo vital de los datos.
 - **Justificación:** Go se compila como un binario estático, sin requerir una JVM de 200MB en las máquinas de donde obtiene los datos. Es altamente concurrente y consume ~15MB-30MB de memoria en ejecución. Ideal para *sidecars* y sistemas embebidos de monitorización.
 
-### 🌟 3.6. Apache Avro
-Para la codificación del mensaje de Kafka a RMI.
+### 🌟 3.6. Apache Avro + Schema Registry
+Para la codificación del mensaje publicado en Kafka.
 - **Justificación:** Frente a JSON que necesita descifrar strings, Avro comprime los datos de forma binaria apoyado en un *schema* fijo, reduciendo drásticamente (hasta en un 70%) el tamaño de banda ocupada en red y acelerando la de-serialización.
+- **Gobierno del esquema:** un **Schema Registry** (Confluent en local; compatible con Apicurio) centraliza la definición del esquema (`schemas/telemetry.avsc`). NiFi serializa con él al publicar y el cliente Java deserializa con `KafkaAvroDeserializer`, garantizando compatibilidad y evolución controlada del contrato de datos.
+
+### 🌟 3.7. Apache NiFi (Gateway de ingesta con verificación de licencia)
+Pasarela que media entre los agentes Go y Kafka.
+- **Justificación:** desacopla a los agentes del broker (no manejan credenciales ni topología de Kafka), centraliza la **autenticación por licencia** contra MySQL con revocación inmediata (`activa = 0`) y aporta trazabilidad de la ingesta. Solo las licencias activas se publican en `telemetry`; el resto se rechaza con HTTP 401.
+- **Resultado:** control de acceso por collector sin tocar el código de los agentes, a coste de un salto de red adicional. Documentado en `NIFI_GATEWAY.md`.
+
+### 🌟 3.8. Apache Cassandra
+Almacén de la serie temporal de telemetría.
+- **Justificación:** Cassandra ofrece escritura rápida y escalabilidad horizontal lineal para series temporales de alto volumen, ideal para el flujo continuo de mediciones. El keyspace `webhardmon` modela `mediciones` (particionada por `empresa_id` y ordenada por `ts DESC`), junto con `ordenadores` y `empresas`.
+- **Justificación de la doble BD:** MySQL conserva el modelo relacional de la aplicación (empresa, administrador, usuario, licencia) y la autenticación de agentes; Cassandra absorbe la carga de escritura de telemetría sin penalizar la BD relacional.
 
 ### 🌟 3.7. TLS/SSL para Cifrado
 Para la comunicación en el interior del cluster.
@@ -1380,13 +1945,15 @@ Para la comunicación en el interior del cluster.
 Para empaquetar cómo coopera todo, este es el viaje de 1 milisegundo de tu aplicación:
 
 1. **[GO]** Un sensor en el Agente de Go detecta que la CPU local está al 90%. Empaqueta esta información.
-2. **[GO -> AVRO]** Go serializa la métrica utilizando codificación binaria *Avro* y un schema compartido.
-3. **[GO -> KAFKA]** Go envía este paquete binario al topic `telemetry` en *Kafka*.
+2. **[GO -> NIFI]** Go envía la métrica por HTTP POST al gateway de NiFi, incluyendo las cabeceras de licencia (`X-License-Code`, `X-Portatil`).
+3. **[NIFI]** NiFi verifica la licencia contra MySQL (`licencia.activa = 1`). Si es inválida, responde **HTTP 401** y descarta el dato. Si es válida, serializa a **Avro** (gobernado por Schema Registry) y publica en el topic `telemetry` de Kafka (HTTP 200 al agente).
 4. **[BROKER]** Kafka almacena el paquete y se asegura de que exista persistencia y replicación.
-5. **[JAVA CLIENT]** El nodo `Client` ("el consumidor"), escuchando mediante un bucle de consumo en el hilo principal, recibe instantáneamente desde Kafka el paquete Avro.
-6. **[JAVA CLIENT -> LOAD BALANCER]** El `Client` verifica su caché Gossip. Descubre que hay 3 nodos vivos. El puntero *round-robin* selecciona el `NODO 2` y despacha el procesamiento en un Virtual Thread.
-7. **[JAVA RMI (TLS)]** El Virtual Thread invoca `stubNODO2.processTelemetry(paquete_avro)`. El flujo viaja por red con encriptación TLS.
-8. **[JAVA NODE]** El `NODO 2` (Motor de Cálculo) recibe el Byte Array instanciando un *Virtual Thread*, deserializa el paquete y efectúa la lógica de transformación / cálculo o almacenamiento final.
+5. **[JAVA CLIENT]** El `rmi-client` ("el consumidor"), mediante un bucle de `poll`, recibe el registro Avro y lo deserializa con `KafkaAvroDeserializer` (resolviendo el esquema vía Schema Registry).
+6. **[JAVA CLIENT -> LOAD BALANCER]** El `Client` verifica su caché Gossip. Descubre que hay 3 nodos vivos. El puntero *round-robin* selecciona el `NODO 2` y despacha el cálculo en un Virtual Thread.
+7. **[JAVA RMI (TLS)]** El Virtual Thread invoca remotamente el cálculo del `StressScore` (mediante `StressTask`) sobre el `NODO 2`. El flujo viaja por red con encriptación TLS.
+8. **[JAVA NODE]** El `NODO 2` (Motor de Cálculo) ejecuta `StressTask.execute()` en un *Virtual Thread* y devuelve el StressScore.
+9. **[CASSANDRA]** El cliente persiste la medición enriquecida (métricas + StressScore) en `webhardmon.mediciones`.
+10. **[ACK]** Solo tras procesar y persistir el lote, el cliente confirma el *offset* con `commitSync` (**ack manual**, `enable.auto.commit=false`). Un mensaje no procesable se aparca en la **dead-letter** `telemetry.DLT` sin bloquear el flujo, garantizando *at-least-once*.
 
 
 ## 5. 🚀 Resiliencia (Casos Extremos)
@@ -1394,6 +1961,8 @@ Para empaquetar cómo coopera todo, este es el viaje de 1 milisegundo de tu apli
 - **Un Nodo de procesado se quema/cae:** Los demás dejarán de recibir pings. Tras 3-5 iteraciones, el nodo se elimina del Directorio Global P2P. El Cliente al fallar su intento inicial, lanza un *Failover* automático e intenta el siguiente nodo transparente. Ningún dato de Kafka se pierde.
 - **Go genera 100 veces más tráfico del habitual:** Kafka se encargará del encolamiento y almacenamiento. El cluster procesará tan rápido como pueda.
 - **Se incorporan más Nodos:** Simplemente arrancan un nuevo proceso instanciado apontando a la capa de Semillas (*Seeds*). En un par de *pings* el cluster entero conoce los nuevos recursos computacionales disponibles de forma orgánica.
+- **El consumidor falla al procesar/persistir un mensaje:** gracias al **ack manual**, el *offset* solo se confirma tras procesar el lote, de modo que un fallo provoca el reprocesamiento (semántica *at-least-once*) y ningún mensaje se pierde. Un mensaje irrecuperable (p.ej. corrupto) se desvía a la **dead-letter** `telemetry.DLT` con cabeceras de diagnóstico, sin bloquear el resto del flujo.
+- **Un collector con licencia revocada o falsa intenta inyectar datos:** NiFi lo rechaza en el gateway con **HTTP 401** verificando `licencia.activa` contra MySQL, antes de tocar Kafka. La revocación (`activa = 0`) surte efecto en el siguiente envío sin reiniciar nada.
 
 ---
 
@@ -1486,15 +2055,82 @@ Se evaluó el comportamiento global del sistema distribuyendo **150 tareas de al
        java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Benchmark cluster localhost:6100 localhost:6101 localhost:6102
        ```
   4. El programa despacha en paralelo las 150 tareas desde el cliente mediante un pool de hilos virtuales balanceándolas uniformemente en Round-Robin entre los stubs RMI disponibles. Mide el tiempo total en milisegundos que le toma procesar el lote completo bajo cada topología de clúster incremental y calcula el rendimiento (tareas/seg).
+
+---
+
+## 7. 📦 Despliegue y Operación
+
+El sistema se empaqueta en contenedores y se despliega por **capas de Docker Compose**, lo que permite levantar solo el núcleo de procesamiento o el stack completo con ingesta.
+
+### 7.1. Imágenes
+| Imagen | Rol | Réplicas |
+|---|---|---|
+| `rmi-server` | Nodo del clúster RMI (calcula StressScore). Clúster P2P con gossip. | 3 (1 por VM) |
+| `rmi-client` | Puente: consume Kafka (Avro/SR) → StressScore por RMI → escribe Cassandra. | 1 |
+
+Se construyen desde `server/Dockerfile` y `client/Dockerfile` y se publican en **Harbor** (local) o **Artifact Registry** (GCP). Detalle del contrato de integración en `CONTAINER_CONTRACT.md`.
+
+### 7.2. Compose por capas
+- **`docker-compose.yml` (core):** Kafka + Schema Registry + Cassandra (con `cassandra-init` que carga `db/schema-cassandra.cql`) + 3 nodos `rmi-server` + `rmi-client`. Es un entorno end-to-end de procesamiento sin necesidad de la infra del equipo.
+- **`docker-compose.ingest.yml` (overlay de ingesta):** añade **NiFi** + **MySQL** (inicializado con `db/init.sql`). Se fusiona con el core compartiendo red:
+  ```bash
+  docker compose -f docker-compose.yml -f docker-compose.ingest.yml up -d
+  ```
+- **`docker-compose.gcp.yml` (producción):** core de producción en GCP; admite el mismo overlay de ingesta con `-f`.
+
+### 7.3. Nube y orquestación
+- **GCP turnkey:** `deploy-gcp.sh` automatiza el despliegue en Google Cloud (ver `DEPLOY_GCP.md`).
+- **Kubernetes:** `k8s-deployment.yaml` describe el despliegue en clúster K8s.
+- **Infraestructura del equipo:** repositorio OpenTofu **`webhardmon-infra`** que provisiona **3 nubes** (Proxmox local + GCP-A + GCP-B) interconectadas por una malla **WireGuard**, con **Cloudflare Tunnel** para exposición y registries **Harbor** + **Artifact Registry**.
+  > ⚠️ **RMI sobre WireGuard:** los `HOST`/`SEEDS`/`java.rmi.server.hostname` deben ser nombres/IPs del *WireGuard*, no de Docker, o los stubs RMI apuntarán a direcciones inalcanzables entre VMs.
+
+### 7.4. Integración Continua (CI)
+- **SonarCloud:** `.github/workflows/sonar.yml` analiza el monorepo multi-lenguaje (**Java 21** de los 3 módulos Maven + **Go** del agente). Configuración en `sonar-project.properties`.
+
+### 7.5. Ficheros clave del proyecto
+| Fichero | Propósito |
+|---|---|
+| `schemas/telemetry.avsc` | Esquema Avro del topic `telemetry` (subject `telemetry-value`). |
+| `db/schema-cassandra.cql` | Keyspace `webhardmon` y tablas (`mediciones`, `ordenadores`, `empresas`). |
+| `db/init.sql` | Esquema + seed de la BD de la aplicación (MySQL). |
+| `NIFI_GATEWAY.md` | Guía del gateway de ingesta NiFi y la verificación de licencia. |
+| `CONTAINER_CONTRACT.md` | Contrato de despliegue de las imágenes `rmi-server`/`rmi-client`. |
     </script>
 
     <script type="text/markdown" id="doc-reference">
 # 🚀 Quick Reference & Guía de Inicio Rápido
 
+## 🧭 Pipeline End-to-End
+
+```
+Agente Go → Apache NiFi → Apache Kafka → Client Java (rmi-client) → Cluster RMI (rmi-server x3) → Cassandra
+            (valida licencia      (topic "telemetry")   (KafkaConsumer + ACK manual          (StressScore por RMI,      (keyspace webhardmon,
+             contra MySQL +                              + dead-letter "telemetry.DLT")        gossip, Virtual Threads)    tabla mediciones)
+             Avro + Schema Registry)
+```
+
+- **Middleware:** Java RMI + Apache Kafka (ya no se usa RabbitMQ).
+- **MySQL:** base de datos de aplicación (empresa / administrador / usuario / licencia).
+- **Cassandra:** almacenamiento de telemetría (keyspace `webhardmon`, tabla `mediciones`).
+
+### 🔌 Tabla de Puertos
+
+| Servicio | Puerto |
+|----------|--------|
+| RMI (nodos del cluster) | 6100-6102 |
+| Kafka | 9092 (interno) / 9094 (externo) |
+| Schema Registry | 8085 |
+| Cassandra | 9042 |
+| NiFi (ingesta) | 8081 |
+| NiFi (UI) | 8443 |
+| MySQL | 3306 |
+
+---
+
 ## 📋 Tabla Comparativa: Los 4 Componentes
 
-| Clase / Fichero | Rol | Puerto | ¿RMI? | ¿Corre solo? | Responsabilidad |
-|-----------------|-----|--------|-------|--------------|-----------------|
+| Archivo | Rol | Puerto | ¿RMI? | ¿Corre solo? | Responsabilidad |
+|---------|-----|--------|-------|-------------|-----------------|
 | **Endpoint.java** | Datos | - | ✓ (Serializable) | N/A | Identidad de red (IP:puerto) |
 | **ComputeService.java** | Interfaz | - | ✓ (Remote) | N/A | Contrato RMI para nodos |
 | **ClusterNode.java** | Servidor | 6100+ | ✓ (exports self) | ✓ SÍ | Nodo del cluster (gossip, compute) |
@@ -1502,11 +2138,88 @@ Se evaluó el comportamiento global del sistema distribuyendo **150 tareas de al
 
 ---
 
-## 🏃 Ejecución en 5 Pasos
+## 🎯 ¿Cuál es el Propósito de Cada Clase?
+
+### Endpoint.java
+```
+Propósito: Ser el "DNI" de un nodo
+Ejemplo:  node-1@localhost:6100
+Usa:      Serializable (viaja por RMI)
+```
+
+### ComputeService.java
+```
+Propósito: Definir QUYÉ operaciones hacen los nodos
+Tipo:     Interface + Remote
+Métodos:  getNodeId(), ping(), processTelemetry(), gossip()
+Usa:      Implementada por ClusterNode
+```
+
+### ClusterNode.java
+```
+Propósito: SER un nodo del cluster
+Tipo:     Servidor RMI
+Ejecuta:
+  1. processTelemetry(payload) = calcula StressScore
+  2. gossip(sender, view) = descubrimiento
+  3. ping() = liveness check
+
+Arranca con: java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode <nodeId> <host> <port> <seed...>
+```
+
+### Client.java
+```
+Propósito: Consumir Kafka y usar el cluster para calcular StressScore
+Tipo:     KafkaConsumer (KafkaAvroDeserializer) + Cliente RMI
+Ejecuta:
+  1. Bootstrap RMI desde semillas
+  2. Consume topic "telemetry" con ACK MANUAL
+     (mensajes fallidos -> dead-letter "telemetry.DLT")
+  3. Cache + round-robin + failover automático
+  4. processTelemetry() por RMI y persiste en Cassandra
+
+Arranca con: java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client <seed:port> [seed:port ...]
+```
+
+---
+
+## 🐳 Arranque con Docker (recomendado)
+
+```bash
+# Stack local core: kafka + schema-registry + cassandra + 3 nodos + client
+docker compose up -d
+
+# Con ingesta NiFi + MySQL (overlay)
+docker compose -f docker-compose.yml -f docker-compose.ingest.yml up -d
+```
+
+Imágenes: `rmi-server` (`server/Dockerfile`) y `rmi-client` (`client/Dockerfile`).
+
+### Agente Go (publica telemetría a NiFi)
+
+```bash
+cd AgenteGo-main
+go run . -mode=publisher -nifi-url="http://localhost:8081/telemetry" -codigo="DEMO-KEY-0001" -portatil="portatil-01"
+
+# Modo consumer de prueba (lee de Kafka directamente)
+go run . -mode=consumer -kafka-brokers="localhost:9094"
+```
+
+### Despliegue en GCP (turnkey)
+
+```bash
+cp .env.example .env
+./deploy-gcp.sh
+```
+
+---
+
+## 🏃 Ejecución Manual en 5 Pasos
 
 ### PASO 1: Compilar
 ```bash
-mvn clean install
+mvn clean package -DskipTests
+# Genera: server/target/server-1.0-SNAPSHOT.jar y client/target/client-1.0-SNAPSHOT.jar
 ```
 
 ### PASO 2: Arrancar 3 Nodos
@@ -1522,54 +2235,374 @@ java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-3 localh
 ```
 
 ### PASO 3: Esperar 3-5 segundos
-Los nodos se conocen entre sí vía gossip. Verás en los logs: `"Refreshed cluster view..."`
-
-### PASO 4: Arrancar Cliente
 ```bash
+# Los nodos se conocen entre sí vía gossip
+# Verás en los logs: "Refreshed cluster view..."
+```
+
+### PASO 4: Arrancar Cliente (consumidor Kafka / puente a Cassandra)
+```bash
+# Terminal 4
 java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 localhost:6101 localhost:6102
+
+# Lee de su entorno: KAFKA_BOOTSTRAP_SERVERS, SCHEMA_REGISTRY_URL,
+# CASSANDRA_CONTACT_POINTS, CASSANDRA_LOCAL_DC, CASSANDRA_KEYSPACE=webhardmon, TELEMETRY_TOPIC
 ```
 
 ### PASO 5: Ver Resultados
-El cliente consumirá telemetría de RabbitMQ y la balanceará entre los nodos dinámicamente.
+```bash
+# Cliente hace 12 processTelemetry() calls:
+
+
+
+# ...
+
+```
+
+### Benchmarks (opcional)
+```bash
+# Local
+java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Benchmark
+
+# Escalabilidad (contra el cluster)
+java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Benchmark cluster localhost:6100 localhost:6101 localhost:6102
+```
 
 ---
 
 ## 🔍 Entender los Logs
 
-### Startup Normal (NODE-1)
-`[node-1] Registered ComputeNode on port 6100` -> Nodo arrancó, crea su RMI Registry en puerto 6100.
+### ✅ Startup Normal (NODE-1)
+```
+[node-1] Registered ComputeNode on port 6100
+[node-1] Starting gossip scheduler (interval: 3s)
+```
+**Significa:** Nodo arrancó, crea su RMI Registry en puerto 6100
 
-### Bootstrap Esperando Seeds
-`Gossip with localhost:6101... failed (ConnectException)` -> Node-1 es el primero en arrancar, no encuentra otros. Es normal.
+### ✅ Bootstrap Esperando Seeds
+```
+Gossip with localhost:6101... failed (ConnectException)
+Gossip with localhost:6102... failed (ConnectException)
+```
+**Significa:** Node-1 es el primero en arrancar, no encuentra otros. Normal.
 
-### Otro Nodo Se Une
-`Refreshed cluster view via localhost:6100: [node-1@localhost:6100, node-2@localhost:6101]` -> Node-2 se conectó a Node-1 y obtuvo la lista de miembros.
+### ✅ Otro Nodo Se Une
+```
+Refreshed cluster view via localhost:6100:
+  [node-1@localhost:6100, node-2@localhost:6101]
+```
+**Significa:** Node-2 se conectó a Node-1 y obtuvo la lista de miembros
 
-### Cliente Bootstrap
-`Refreshed cluster view via localhost:6100: [node-1@localhost:6100, node-2@localhost:6101, node-3@localhost:6102]` -> Cliente se conectó y cacheó todos los miembros.
+### ✅ Cliente Bootstrap
+```
+Refreshed cluster view via localhost:6100:
+  [node-1@localhost:6100, node-2@localhost:6101, node-3@localhost:6102]
+```
+**Significa:** Cliente se conectó y cacheó todos los miembros
 
-### Cliente Balanceo
-`-> dispatching telemetry to node-1@localhost:6100` -> Cliente alterna entre nodos de forma balanceada.
+### ✅ Cliente Balanceo
+```
+-> dispatching to node: processTelemetry(payload)
+-> dispatching to node: processTelemetry(payload)
+-> dispatching to node: processTelemetry(payload)
+-> dispatching to node: processTelemetry(payload)
+```
+**Significa:** Cliente alterna entre nodos (carga balanceada)
 
-### Fallo (si un nodo cae)
-`node-2@localhost:6101 failed (ConnectException), trying next...` -> Cliente intentó NODE-2, falló, probará NODE-3.
+### ❌ Fallo (si un nodo cae)
+```
+node-2@localhost:6101 failed (ConnectException), trying next...
+```
+**Significa:** Cliente intentó NODE-2, falló, probará NODE-3
 
-### Eviction (después de 3 fallos)
-`Evicted (no response after 3 rounds): node-2@localhost:6101` -> NODE-1 dio por perdido a NODE-2, lo marcó muerto por 30s.
+### ❌ Eviction (después de 3 fallos)
+```
+EVICTED: node-2@localhost:6101 (too many failures)
+Tombstone set: node-2@localhost:6101 (expires in 30s)
+```
+**Significa:** NODE-1 dio por perdido a NODE-2, lo marcó muerto por 30s
+
+### ✅ Rejoin (nodo reinicia)
+```
+Tombstone cleared by direct contact: node-2@localhost:6101
+```
+**Significa:** NODE-2 contactó a NODE-1, se borraron los 30 segundos de espera
 
 ---
 
 ## 🐛 Troubleshooting
 
-### Problema: "Port already in use: 6100"
-* **Causa**: Un proceso Java previo sigue ocupando el puerto RMI.
-* **Solución**: Mata el proceso usando:
-  * En Windows: `Stop-Process -Name java -Force`
-  * En Linux: `pkill -f "ClusterNode"`
+### Problema: "Port already in use"
+```
+Exception: java.rmi.server.ExportException: Port already in use: 6100
+
+Solución:
+1. Cambia el puerto en el comando:
+   java -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-new localhost 6103 ...
+2. O mata el proceso anterior:
+   pkill -f "cluster.ClusterNode"
+3. O espera a que Java libere el puerto (~1 minuto)
+```
 
 ### Problema: Cliente dice "Could not contact any seed"
-* **Causa**: Ningún nodo está corriendo en los puertos indicados.
-* **Solución**: Asegúrate de levantar al menos una semilla primero. Verifica el firewall y las direcciones host de red.
+```
+Exception: Could not contact any seed or known member
+
+Causas posibles:
+❌ Ningún nodo está corriendo
+❌ Tipeo mal la dirección (node-1 vs localhost)
+❌ Firewall bloqueando puertos 6100-6102
+❌ Nodos en máquinas distintas y no hay conectividad
+
+Solución:
+✓ Asegúrate que mínimo 1 nodo está running
+✓ Verifica: netstat -an | grep 610
+✓ Test: telnet localhost 6100
+```
+
+### Problema: Cliente se cuelga
+```
+-> dispatching to node: processTelemetry(payload)
+(sin output por 60+ segundos)
+
+Causa: Timeout de RMI (default ~30s)
+
+Solución:
+java -Dsun.rmi.transport.tcp.responseTimeout=5000 \
+     cluster.Client localhost:6100
+```
+
+### Problema: Logs no aparecen
+```
+Solución: Asegúrate que usas System.out.println()
+(Los System.err.println() van a stderr)
+
+O redirige:
+java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100 2>&1 | tee output.log
+```
+
+---
+
+## 📊 Resumen Visual: ¿Quién habla con quién?
+
+```
+┌──────────────┐
+│   CLIENT     │
+└──────┬───────┘
+       │
+       │ 1. gossip() ← Descubrimiento
+       │
+       ▼
+   ┌───────────┐
+   │ Seed Nodo │ (cualquiera: NODE-1, 2, o 3)
+   └─────┬─────┘
+         │
+         │ Devuelve lista completa
+         │
+   ┌─────▼─────────────────────────┐
+   │ CLIENT cacheado:              │
+   │  {NODE-1, NODE-2, NODE-3}     │
+   └─────┬─────────────────────────┘
+         │
+         │ 2. processTelemetry() ← Tarea
+         │
+    ┌────┴────┬──────────┬──────────┐
+    ▼         ▼          ▼          ▼
+  NODE-1    NODE-2    NODE-3     NODE-1 (round-robin)
+  StressScore  StressScore  StressScore  StressScore
+    │         │         │          │
+    └─────────┴─────────┴──────────┘
+            Respuestas
+```
+
+---
+
+## 🎓 Vocabulario Clave
+
+| Término | Significado | Ejemplo |
+|---------|-------------|---------|
+| **Bootstrap** | Arranque inicial (cliente obtiene lista de miembros) | Client llama gossip() a una semilla |
+| **Gossip** | Protocolo de chismes (nodos intercambian membresía) | NODE-1 le dice a NODE-2: "conozco a NODE-3" |
+| **Failover** | Cambio automático a alternativa | Cliente intenta NODE-2, falla, intenta NODE-3 |
+| **Tombstone** | Marca de "nodo muerto" (temporal) | NODE-1 evicta NODE-2, lo marca muerto por 30s |
+| **Anti-entropy** | Protocolo que reduce el desorden | Gossip hace que todos aprendan lo mismo |
+| **Round-robin** | Alternancia circular | Llamada 1→NODE-1, 2→NODE-2, 3→NODE-3, 4→NODE-1 |
+| **SPOF** | Single Point of Failure (punto único de fallo) | No hay SPOF aquí (sin servidor central) |
+| **RMI** | Remote Method Invocation (llamadas remotas Java) | `stub.processTelemetry(payload)` es una llamada remota |
+| **Registry** | Directorio de servicios RMI | Cada nodo crea su propio registry |
+| **Kafka** | Bus de mensajería (topic "telemetry", 9092/9094) | Reemplaza al antiguo RabbitMQ |
+| **ACK manual** | Confirmación explícita del consumidor | El client confirma sólo tras procesar el mensaje |
+| **Dead-letter (DLT)** | Cola de mensajes fallidos | Lo no procesable va a "telemetry.DLT" |
+| **Schema Registry** | Registro de esquemas Avro (8085) | NiFi/Kafka validan y (de)serializan con Avro |
+| **Cassandra** | BD NoSQL de telemetría | Keyspace `webhardmon`, tabla `mediciones` |
+| **NiFi** | Ingesta: valida licencia y publica a Kafka | Recibe del Agente Go en 8081 (UI en 8443) |
+
+---
+
+## 🔗 Relaciones entre Clases
+
+```
+ComputeService (interfaz)
+       ▲
+       │ implements
+       │
+ClusterNode ◄─── extends UnicastRemoteObject
+   │  │  │
+   │  │  └─► Mantiene: members (Map<String, Endpoint>)
+   │  │
+   │  └──► Usa: Endpoint (serializable)
+   │
+   └──► Expone sobre RMI
+           (client puede llamar)
+
+Client
+   │
+   ├─► Conoce: List<Endpoint> seeds
+   │
+   ├─► Cacheado: List<Endpoint> members
+   │
+   └─► Llamada RMI
+       └─► Stub (ComputeService)
+           └─► ClusterNode remoto
+```
+
+---
+
+## 📈 Escalabilidad
+
+### ¿Qué pasa si agregamos 100 nodos?
+
+| Aspecto | Impacto |
+|---------|---------|
+| Gossip load | Cada nodo itera 100 peers cada 3s (~33/s) → Escalable |
+| Cliente discovery | Mismo (bootstrap desde 1 seed) |
+| Memory (per node) | members = Map 100 * Endpoint → ~10KB → OK |
+| Network (gossip) | 100 nodos * 100 gossips/3s ≈ 3300 RMI calls/s → Posible saturar red |
+| Failover latency | Sin cambios (round-robin sigue igual) |
+
+**Conclusión:** Escalable hasta ~50-100 nodos con gossip cada 3s. Para más, necesitas gossip probabílístico (no todos con todos).
+
+---
+
+## 🎮 Ejercicios Propuestos
+
+### Ejercicio 1: Simular fallo
+```bash
+# Terminal 4 (Node-3):
+# Ctrl+C mientras cliente corre
+# Observa cómo cliente sigue funcionando sin NODE-3
+```
+
+### Ejercicio 2: Agregar métodos a ComputeService
+```java
+// Agrega a ComputeService.java:
+String getStatus() throws RemoteException;
+
+// Implementa en ClusterNode.java:
+@Override
+public String getStatus() {
+    return "Members: " + members.keySet();
+}
+```
+
+### Ejercicio 3: Monitorear estado en vivo
+```java
+// En Client.java, antes de processTelemetry():
+while (true) {
+    System.out.println("Current members: " +
+        client.members.values());
+    Thread.sleep(1000);
+    client.processTelemetry(payload);
+}
+```
+
+### Ejercicio 4: Agregar logging a gossip
+```java
+// En ClusterNode.gossip():
+System.out.println("GOSSIP: sender=" + sender +
+    ", received=" + theirView.size() + " members");
+```
+
+---
+
+## 🚦 Estado del Proyecto
+
+```
+Funcionalidad       Estado      Notas
+──────────────────────────────────────────────────────
+Bootstrap           ✅ DONE     Desde semillas
+Gossip              ✅ DONE     Cada 3 segundos
+Failover            ✅ DONE     Automático round-robin
+Tombstones          ✅ DONE     30 segundos TTL
+Rejoin              ✅ DONE     Immediatamente si contacto directo
+Ingesta Kafka       ✅ DONE     ACK manual + dead-letter "telemetry.DLT"
+Persistencia        ✅ DONE     Cassandra (keyspace webhardmon, tabla mediciones)
+Encriptación        ✅ Implementada (RMI con TLS)
+Split-brain solve   ❌ TODO     (no resuelto)
+Rebalanceo          ❌ TODO     (no redistribuye en altas cargas)
+```
+
+---
+
+## 🏁 Conclusión Rápida
+
+| Pregunta | Respuesta |
+|----------|-----------|
+| ¿Qué es? | Cluster P2P con gossip, sin servidor central |
+| ¿Cómo arranca? | Cliente contacta CUALQUIER seed, obtiene lista completa |
+| ¿Qué hace? | Calcula el StressScore de la telemetría en cualquier nodo disponible |
+| ¿Si falla un nodo? | Cliente automáticamente intenta otro (transparente) |
+| ¿Si vuelve a levantarse? | Rejoin inmediato (gossip directo borra tombstone) |
+| ¿Punto único de fallo? | NO (todo es redundante) |
+| ¿Producción-ready? | Persistencia (Cassandra) y encriptación (TLS) listas; falta monitoreo y resolución de split-brain |
+
+---
+
+---
+
+## 🔐 TLS/SSL Support
+
+El cluster **soporta encriptación TLS** para comunicación segura.
+
+### Quick Start TLS:
+
+```bash
+# Windows
+generate-certs.bat
+run-with-tls.bat
+
+# Linux/Mac
+chmod +x generate-certs.sh run-with-tls.sh
+./run-with-tls.sh
+```
+
+### Ejecutar Manualmente Con TLS:
+
+```bash
+# Nodo
+java -Djavax.net.ssl.keyStore=server.keystore \
+     -Djavax.net.ssl.keyStorePassword=changeit \
+     -cp server/target/server-1.0-SNAPSHOT.jar cluster.ClusterNode node-1 localhost 6100 localhost:6100 localhost:6101
+
+# Cliente
+java -Djavax.net.ssl.trustStore=server.keystore \
+     -Djavax.net.ssl.trustStorePassword=changeit \
+     -cp client/target/client-1.0-SNAPSHOT.jar cluster.Client localhost:6100
+```
+
+| Documento | Propósito |
+|-----------|-----------|
+| [TLS_QUICK_START.md](TLS_QUICK_START.md) | Inicio rápido TLS (5 min) |
+| [RESUMEN_TLS.md](RESUMEN_TLS.md) | Resumen completo de TLS |
+| [RUN_WITH_TLS.md](RUN_WITH_TLS.md) | Guía detallada y troubleshooting |
+
+---
+
+**📞 Para más detalles, ver:**
+- `ARQUITECTURA.md` - Explicación completa
+- `SIMULACIONES_Y_EJEMPLOS.md` - Casos de uso
+- `NIFI_GATEWAY.md` - Ingesta NiFi (validación de licencia + Avro + Schema Registry)
+- `TLS_QUICK_START.md` - Inicio rápido con TLS
     </script>
 
     <script type="text/markdown" id="doc-tls">

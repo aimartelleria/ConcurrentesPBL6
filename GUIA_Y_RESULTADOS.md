@@ -1,52 +1,72 @@
 # 📖 Guía de Ejecución y Resultados del Cluster
 
-Este documento explica cómo funciona el flujo de datos entre el agente de monitoreo (Go), la cola de mensajería (RabbitMQ) y la malla de procesamiento distribuido (Java RMI), y detalla cómo interpretar los resultados obtenidos en las pruebas de ejecución y failover.
+Este documento explica cómo funciona el flujo de datos entre el agente de monitoreo (Go), el gateway de ingesta (Apache NiFi), el bus de mensajería (Apache Kafka) y la malla de procesamiento distribuido (Java RMI), y detalla cómo interpretar los resultados obtenidos en las pruebas de ejecución y failover.
 
 ---
 
 ## 🏗️ Flujo de Datos
 
 ```text
-┌────────────────┐          ┌──────────────┐          ┌──────────────┐
-│   Agente Go    │ ──Avro──►│   RabbitMQ   │ ──AMQP──►│ Cliente Java │
-│ (Métricas CPU/ │          │   (Broker)   │          │ (RMI Bridge) │
-│  RAM/Disk/Temp)│          └──────────────┘          └──────┬───────┘
-└────────────────┘                                           │
-                                                  Balanceo / │ RMI
-                                                    Failover │
-                                                             ▼
-                                                    ┌────────────────┐
-                                                    │  Cluster Java  │
-                                                    │ (Virtual Th.)  │
-                                                    └────────────────┘
+┌────────────────┐   HTTP POST    ┌──────────────┐   Avro    ┌──────────────┐
+│   Agente Go    │ ──(X-License──►│  Apache NiFi │ ──+SR───► │ Apache Kafka │
+│ (Métricas CPU/ │     Code)      │  (Gateway de │           │  (topic      │
+│  RAM/Disk/Temp)│                │   ingesta)   │           │  "telemetry")│
+└────────────────┘                └──────┬───────┘           └──────┬───────┘
+                                  Valida  │ licencia (MySQL)         │
+                                  Enriquece (empresa_id, nombre)     │ KafkaConsumer
+                                  Serializa Avro + Schema Registry   │ (ack manual +
+                                  Rechaza inválidos                  │  dead-letter)
+                                                                     ▼
+                                                            ┌──────────────┐
+                                                            │ Cliente Java │
+                                                            │ (RMI Bridge) │
+                                                            └──────┬───────┘
+                                                       Balanceo /  │ RMI
+                                                         Failover  │ (round-robin)
+                                                                   ▼
+                                              ┌────────────────┐       ┌──────────────┐
+                                              │  Cluster Java  │       │  Cassandra   │
+                                              │ (Virtual Th.)  │       │ (mediciones) │
+                                              └────────────────┘       └──────────────┘
+                                                  StressScore    ──persiste──►
 ```
 
-1. **Agente Go**: Inspecciona el sistema operativo usando `gopsutil` en intervalos regulares, genera un registro binario serializado con el esquema **Avro**, y lo publica en un exchange tipo fanout (`telemetry_fanout`) de RabbitMQ.
-2. **Cliente Java**: Está permanentemente suscrito al exchange de RabbitMQ. En cuanto recibe una métrica binaria en formato Avro, actúa como un puente ("bridge") y la despacha al cluster Java utilizando llamadas RMI.
-3. **Nodos del Cluster Java (`ClusterNode`)**:
-   - Cada nodo hospeda su propio registro RMI de forma distribuida (sin un servidor central).
+1. **Agente Go (collector)**: Inspecciona el sistema operativo usando `gopsutil` en intervalos regulares (CPU/RAM/Disco/Temperatura) y envía cada lectura mediante **HTTP POST** al gateway de ingesta **Apache NiFi**, incluyendo cabeceras de licencia (`X-License-Code` = código y `X-Portatil`). Ya no publica directamente en ningún broker.
+2. **Apache NiFi (gateway de ingesta)**: Valida la licencia recibida contra **MySQL** (debe estar activa), enriquece el registro con `empresa_id` y `nombre`, serializa la métrica a **Avro** apoyándose en el **Schema Registry**, enruta los mensajes válidos al topic de **Kafka** y rechaza los inválidos.
+3. **Apache Kafka (topic `telemetry`)**: Actúa como bus asíncrono entre la ingesta y el procesamiento. Los mensajes viajan en **Avro** con gobierno de esquema vía **Schema Registry** (puerto 9092 interno / 9094 externo).
+4. **Cliente Java (`rmi-client`)**: Un `KafkaConsumer` con `KafkaAvroDeserializer` consume el topic `telemetry`. Usa **ACK manual** (hace commit del offset tras procesar correctamente el lote) y una cola **dead-letter** (`telemetry.DLT`), garantizando semántica *at-least-once*. Actúa como puente ("bridge") despachando cada métrica al cluster Java mediante llamadas **RMI**.
+5. **Nodos del Cluster Java (`ClusterNode`)**:
+   - Cada nodo hospeda su propio registro RMI de forma distribuida (P2P, sin un servidor central ni SPOF).
    - Utilizan un protocolo de **Gossip (chisme)** periódico en segundo plano para informarse mutuamente qué nodos están vivos o cuáles han caído (evicción).
-   - Al recibir el paquete Avro, realizan un proceso de enriquecimiento (ETL) y calculan un **Stress Score** en paralelo mediante **Virtual Threads**.
+   - Al recibir el paquete Avro, calculan un **Stress Score** en paralelo mediante **Virtual Threads** (Java 21).
+6. **Persistencia (Cassandra)**: Una vez calculado el Stress Score, el cliente **persiste la medición en Cassandra** (keyspace `webhardmon`, tabla `mediciones`). MySQL queda como base de datos de la aplicación (empresa, administrador, usuario, licencia) y soporte de autenticación por licencia.
 
 ---
 
 ## 🛠️ Ajustes Realizados para la Integración
 
-1. **Exchange Unificado**: Se modificó `SuscriberRabbitMQ.go` para que publique datos en el exchange de tipo fanout `telemetry_fanout`, sincronizándolo con la cola que escucha el `Client.java`.
-2. **Compatibilidad de Compilación**: Se redujo el requerimiento de versión en `go.mod` (`go 1.22+`) y se ejecutó `go mod tidy` para garantizar que compile sin errores en entornos estándares.
+1. **Ingesta vía NiFi + Kafka**: El agente Go (`SubscriberKafka.go`) dejó de publicar directamente en un broker y ahora envía las métricas por **HTTP POST a Apache NiFi**, que valida la licencia, serializa a Avro con Schema Registry y enruta a **Kafka** (topic `telemetry`). El `Client.java` consume ese topic mediante un `KafkaConsumer`.
+2. **Fiabilidad de la entrega**: El consumidor implementa **ACK manual** (commit tras procesar el lote) y **dead-letter** (`telemetry.DLT`), logrando entrega *at-least-once* y aislando los mensajes problemáticos.
+3. **Gobierno del esquema**: El **Schema Registry** centraliza y versiona el esquema Avro compartido entre NiFi (productor) y el cliente Java (consumidor).
+4. **Compatibilidad de Compilación**: Se redujo el requerimiento de versión en `go.mod` (`go 1.22+`) y se ejecutó `go mod tidy` para garantizar que compile sin errores en entornos estándares.
 
 ---
 
 ## 🚀 Cómo iniciar el sistema en local
 
-### 1. Iniciar RabbitMQ
-Levantar el broker en Docker:
+### 1. Levantar el stack con Docker Compose
+El **core** del sistema (Kafka + Schema Registry + Cassandra + los 3 nodos RMI + el cliente) se levanta con un único comando:
 ```bash
-docker run -d --name rabbitmq-cluster -p 5672:5672 -p 15672:15672 rabbitmq:3-management
+docker compose up -d
 ```
+Para añadir el **overlay de ingesta** (Apache NiFi + MySQL), combina ambos ficheros:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.ingest.yml up -d
+```
+Con esto quedan operativos el bus de Kafka (topic `telemetry`), el Schema Registry, Cassandra (keyspace `webhardmon`), los nodos del clúster RMI, el cliente consumidor y el gateway NiFi validando licencias contra MySQL.
 
-### 2. Arrancar los Nodos Java (Cluster)
-Compila el proyecto Java:
+### 2. (Opcional) Arrancar los Nodos Java manualmente
+Si prefieres ejecutarlos fuera de contenedores, compila el proyecto Java:
 ```bash
 mvn clean package
 ```
@@ -61,16 +81,17 @@ java -cp "server/target/server-1.0-SNAPSHOT.jar" cluster.ClusterNode node-2 loca
 # Terminal 3 (Nodo 3)
 java -cp "server/target/server-1.0-SNAPSHOT.jar" cluster.ClusterNode node-3 localhost 6102 localhost:6100 localhost:6101 localhost:6102
 ```
-
-### 3. Arrancar el Cliente Java (Consumidor/Puente)
+Y el cliente Java (consumidor de Kafka / puente RMI):
 ```bash
 java -cp "client/target/client-1.0-SNAPSHOT.jar" cluster.Client localhost:6100 localhost:6101 localhost:6102
 ```
 
-### 4. Ejecutar el Agente Go
+### 3. Ejecutar el Agente Go
+El agente envía las métricas al gateway NiFi (modo *publisher*), incluyendo el código de licencia y el identificador del portátil:
 ```bash
-go run AgenteGo-main/SuscriberRabbitMQ.go -rabbitmq-url amqp://guest:guest@localhost:5672/
+go run . -mode=publisher -nifi-url=http://localhost:8080/contentListener -codigo=TU_CODIGO_LICENCIA -portatil=PC-01
 ```
+> Ejecuta el comando desde el directorio `AgenteGo-main/` (donde reside `SubscriberKafka.go`). Ajusta `-nifi-url`, `-codigo` y `-portatil` a tu entorno.
 
 ---
 
@@ -80,11 +101,11 @@ go run AgenteGo-main/SuscriberRabbitMQ.go -rabbitmq-url amqp://guest:guest@local
 El Agente Go recopila las métricas de hardware del sistema:
 ```text
 Iniciando servicio de recolección métricas en segundo plano...
-Se enviarán métricas a RabbitMQ cada 5 minutos.
+Se enviarán métricas a NiFi/Kafka cada 5 minutos.
 [2026-05-20 08:42:58] Datos recolectados normales: {Timestamp:1779266578 CPUPercent:1.182327318355726 CPUModel:12th Gen Intel(R) Core(TM) i7-12650H RAMPercent:23.011672656562755 RAMTotal:8175046656 DiskPercent:9.89245871010225 DiskTotal:1081101176832 Temp:<nil>}
-[2026-05-20 08:42:58] datos binarios enviados correctamente por RabbitMQ
+[2026-05-20 08:42:58] datos enviados correctamente a NiFi/Kafka
 ```
-* **Interpretación**: Indica que el recolector de Go accedió al hardware del host (o contenedor), serializó la información en formato Avro binario (~78 bytes debido a las cadenas y longs adicionales) y la encoló exitosamente en RabbitMQ.
+* **Interpretación**: Indica que el recolector de Go accedió al hardware del host (o contenedor) y envió la lectura por HTTP POST a NiFi, que validó la licencia, la serializó en formato Avro (con Schema Registry) y la publicó exitosamente en el topic `telemetry` de Kafka.
 
 ### Procesamiento y Enriquecimiento (Java)
 El nodo que recibe la llamada RMI ejecuta el pipeline ETL y visualiza la información formateada:
@@ -181,7 +202,7 @@ Esta prueba distribuye **150 tareas del pipeline de Stress Score (Modelo a Trozo
   * Realiza **detección de anomalías por Z-Score** (umbral > 2σ) y calcula un score final compuesto ponderando los estadísticos con un factor multiplicativo por anomalías detectadas.
   * Luego, ejecuta un bloqueo `Thread.sleep(40)` (40ms) que emula la latencia de almacenamiento distribuido e I/O de red.
 * **Proceso de ejecución**:
-  1. Asegúrate de tener RabbitMQ iniciado (`docker run -d --name rabbitmq-cluster -p 5672:5672 -p 15672:15672 rabbitmq:3-management`).
+  1. Asegúrate de tener el stack base levantado (`docker compose up -d`), que incluye Kafka, Schema Registry y Cassandra.
   2. Levanta entre 1 y 3 nodos de cálculo en terminales independientes:
      - **Terminal del Nodo 1**:
        ```bash
