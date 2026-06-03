@@ -2,18 +2,19 @@
   "type": "record",
   "name": "Telemetry",
   "namespace": "com.webhardmon",
-  "doc": "Telemetria de un equipo. NiFi la publica en Kafka tras validar la licencia y enriquecer con empresa_id + nombre (nombre_ordenador). El servicio Java anade stress_score y la persiste en webhardmon.mediciones. Nombres de campo alineados con las columnas de Cassandra.",
+  "doc": "Registro de telemetría CANÓNICO del equipo (colector -> NiFi -> Kafka Avro + HDFS Parquet). NiFi enriquece empresa_id desde MySQL antes de publicar. Registrado en el Schema Registry (10.0.0.20:8081, compat BACKWARD).",
   "fields": [
-    { "name": "empresa_id",      "type": "long",   "doc": "PK de particion en mediciones" },
-    { "name": "nombre",          "type": "string", "doc": "nombre_ordenador (PK de clustering)" },
-    { "name": "ts",              "type": { "type": "long", "logicalType": "timestamp-millis" } },
-    { "name": "cpu_percent",     "type": "double" },
-    { "name": "ram_percent",     "type": "double" },
-    { "name": "disco_percent",   "type": "double" },
-    { "name": "temperatura",     "type": ["null", "double"], "default": null },
-    { "name": "bateria_percent", "type": ["null", "double"], "default": null },
-    { "name": "ram",             "type": "string", "doc": "texto, p.ej. '16 GB'" },
-    { "name": "almacenamiento",  "type": "string", "doc": "texto, p.ej. '512 GB SSD'" },
-    { "name": "procesador",      "type": ["null", "string"], "default": null, "doc": "para la tabla ordenadores" }
+    { "name": "licencia",                "type": "string", "doc": "código de licencia (API key del colector)" },
+    { "name": "portatil",                "type": "string", "doc": "hostname del portátil" },
+    { "name": "timestamp",               "type": "long",   "doc": "epoch ms UTC" },
+    { "name": "uso_procesador",          "type": "double", "doc": "% uso CPU" },
+    { "name": "uso_ram",                 "type": "double", "doc": "% uso RAM" },
+    { "name": "cantidad_ram",            "type": "double", "doc": "GB totales de RAM (8, 16, 32...)" },
+    { "name": "uso_almacenamiento",      "type": "double", "doc": "% uso disco" },
+    { "name": "cantidad_almacenamiento", "type": "double", "doc": "GB totales de disco (256, 512...)" },
+    { "name": "bateria",                 "type": "double", "doc": "% batería" },
+    { "name": "temperatura",             "type": "double", "doc": "ºC" },
+    { "name": "stressScore",             "type": "double", "doc": "índice 0-100 calculado por el servidor RMI" },
+    { "name": "empresa_id",              "type": "int", "default": 0, "doc": "ID de la empresa propietaria; enriquecido por NiFi desde MySQL (default 0 -> compat BACKWARD)" }
   ]
 }
