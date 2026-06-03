@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -85,6 +86,40 @@ func getTemperatureViaPowerShell() *float64 {
 	return nil
 }
 
+// getBatteryPercent devuelve el % de batería (0-100) o nil si no hay batería
+// (sobremesas/servidores) o no se puede leer. Mismo patrón que la temperatura:
+// sysfs en Linux, WMI vía PowerShell en Windows. Sin dependencias externas.
+func getBatteryPercent() *float64 {
+	switch runtime.GOOS {
+	case "linux":
+		for _, name := range []string{"BAT0", "BAT1", "BAT2"} {
+			data, err := os.ReadFile("/sys/class/power_supply/" + name + "/capacity")
+			if err != nil {
+				continue
+			}
+			if v, perr := strconv.ParseFloat(strings.TrimSpace(string(data)), 64); perr == nil && v >= 0 && v <= 100 {
+				return &v
+			}
+		}
+	case "windows":
+		return getBatteryViaPowerShell()
+	}
+	return nil
+}
+
+// getBatteryViaPowerShell consulta Win32_Battery (EstimatedChargeRemaining es ya un %).
+func getBatteryViaPowerShell() *float64 {
+	psCmd := `Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty EstimatedChargeRemaining`
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", psCmd)
+	output, err := cmd.Output()
+	if err == nil && len(strings.TrimSpace(string(output))) > 0 {
+		if v, perr := strconv.ParseFloat(strings.TrimSpace(string(output)), 64); perr == nil && v >= 0 && v <= 100 {
+			return &v
+		}
+	}
+	return nil
+}
+
 func sendMetrics(nifiURL, codigo, portatil string) {
 	// 1. Recolección de datos
 	c, err := cpu.Percent(time.Second, false)
@@ -114,16 +149,18 @@ func sendMetrics(nifiURL, codigo, portatil string) {
 	}
 
 	currentTemp := getTemperature()
+	currentBat := getBatteryPercent()
 
 	payload := Metrics{
-		Timestamp:   time.Now().Unix(),
-		CPUPercent:  c[0],
-		CPUModel:    cpuModel,
-		RAMPercent:  m.UsedPercent,
-		RAMTotal:    int64(m.Total),
-		DiskPercent: d.UsedPercent,
-		DiskTotal:   int64(d.Total),
-		Temp:        currentTemp,
+		Timestamp:      time.Now().Unix(),
+		CPUPercent:     c[0],
+		CPUModel:       cpuModel,
+		RAMPercent:     m.UsedPercent,
+		RAMTotal:       int64(m.Total),
+		DiskPercent:    d.UsedPercent,
+		DiskTotal:      int64(d.Total),
+		Temp:           currentTemp,
+		BateriaPercent: currentBat,
 	}
 
 	// Printear mensaje antes de serializar
