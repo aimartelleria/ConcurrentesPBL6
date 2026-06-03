@@ -29,6 +29,8 @@ ENV CONSUMER_GROUP="telemetry_java_consumers"
 ENV CASSANDRA_CONTACT_POINTS="cassandra:9042"
 ENV CASSANDRA_LOCAL_DC="datacenter1"
 ENV CASSANDRA_KEYSPACE="webhardmon"
+# URI del NameNode HDFS para el camino batch (Parquet). Vacío = HDFS desactivado.
+ENV HDFS_URI=""
 ENV SEEDS=""
 ENV JVM_OPTS=""
 

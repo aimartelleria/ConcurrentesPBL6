@@ -42,6 +42,40 @@
       <artifactId>java-driver-core</artifactId>
       <version>4.18.1</version>
     </dependency>
+
+    <!-- Avro fijado a 1.11.3 (lo comparten kafka-avro-serializer y parquet-avro);
+         se declara primero para ganar la mediación frente al avro viejo de Hadoop. -->
+    <dependency>
+      <groupId>org.apache.avro</groupId>
+      <artifactId>avro</artifactId>
+      <version>1.11.3</version>
+    </dependency>
+
+    <!-- HDFS (camino batch): escritura de Parquet -->
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-common</artifactId>
+      <version>3.3.6</version>
+      <exclusions>
+        <exclusion><groupId>org.apache.avro</groupId><artifactId>avro</artifactId></exclusion>
+        <exclusion><groupId>org.slf4j</groupId><artifactId>slf4j-reload4j</artifactId></exclusion>
+        <exclusion><groupId>ch.qos.reload4j</groupId><artifactId>reload4j</artifactId></exclusion>
+        <exclusion><groupId>log4j</groupId><artifactId>log4j</artifactId></exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-hdfs-client</artifactId>
+      <version>3.3.6</version>
+      <exclusions>
+        <exclusion><groupId>org.apache.avro</groupId><artifactId>avro</artifactId></exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.parquet</groupId>
+      <artifactId>parquet-avro</artifactId>
+      <version>1.14.0</version>
+    </dependency>
   </dependencies>
 
   <build>
@@ -58,6 +92,22 @@
             </goals>
             <configuration>
               <createDependencyReducedPom>false</createDependencyReducedPom>
+              <!-- Hadoop trae jars firmados y SPI de FileSystem: hay que excluir las
+                   firmas y fusionar los META-INF/services en el fat-JAR. -->
+              <filters>
+                <filter>
+                  <artifact>*:*</artifact>
+                  <excludes>
+                    <exclude>META-INF/*.SF</exclude>
+                    <exclude>META-INF/*.DSA</exclude>
+                    <exclude>META-INF/*.RSA</exclude>
+                    <exclude>module-info.class</exclude>
+                  </excludes>
+                </filter>
+              </filters>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+              </transformers>
             </configuration>
           </execution>
         </executions>

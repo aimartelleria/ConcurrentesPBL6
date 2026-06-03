@@ -137,6 +137,7 @@ public class Client {
         String cassPoints   = env("CASSANDRA_CONTACT_POINTS","localhost:9042");
         String cassDc       = env("CASSANDRA_LOCAL_DC",      "datacenter1");
         String cassKeyspace = env("CASSANDRA_KEYSPACE",      "webhardmon");
+        String hdfsUri      = env("HDFS_URI",                "");   // vacío = HDFS desactivado
         final String DLQ_TOPIC = topic + ".DLT";
 
         // --- Consumidor Kafka con deserializador Avro de Schema Registry ---
@@ -178,6 +179,13 @@ public class Client {
         System.out.printf(" [*] Bridge iniciado. Kafka=%s SR=%s topic=%s Cassandra=%s/%s%n",
                 kafkaBrokers, srUrl, topic, cassPoints, cassKeyspace);
 
+        // Camino batch opcional: HDFS (Parquet). Vacío = desactivado.
+        final HdfsParquetWriter hdfs = hdfsUri.isBlank() ? null : new HdfsParquetWriter(hdfsUri);
+        if (hdfs != null) {
+            Runtime.getRuntime().addShutdownHook(new Thread(hdfs::close));
+            System.out.println(" [*] HDFS batch path activo: " + hdfsUri);
+        }
+
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
         try (CqlSession session = cb.build();
@@ -200,7 +208,7 @@ public class Client {
                 for (ConsumerRecord<String, GenericRecord> record : records) {
                     batch.add(executor.submit(() -> {
                         try {
-                            processRecord(client, session, insert, record.value());
+                            processRecord(client, session, insert, hdfs, record.value());
                             return true;
                         } catch (Exception e) {
                             return sendToDeadLetter(dlqProducer, DLQ_TOPIC, record, e);
@@ -235,9 +243,9 @@ public class Client {
         }
     }
 
-    /** Calcula StressScore por RMI y persiste la medición en Cassandra. */
-    private static void processRecord(Client client, CqlSession session,
-                                      PreparedStatement insert, GenericRecord r) throws Exception {
+    /** Calcula StressScore por RMI y persiste en Cassandra (hot) y, opcional, HDFS (batch). */
+    private static void processRecord(Client client, CqlSession session, PreparedStatement insert,
+                                      HdfsParquetWriter hdfs, GenericRecord r) throws Exception {
         if (r == null) throw new IllegalArgumentException("registro Avro nulo");
 
         long   empresaId = num(r, "empresa_id").longValue();
@@ -269,7 +277,20 @@ public class Client {
         if (bateria != null) b = b.setDouble("bateria_percent", bateria); else b = b.setToNull("bateria_percent");
         session.execute(b.build());
 
-        System.out.printf("   [OK] %s (empresa %d) stress=%.1f -> mediciones%n", nombre, empresaId, stress);
+        // 3. Camino batch: Parquet en HDFS (best-effort; un fallo de HDFS NO afecta a Cassandra).
+        boolean hdfsOk = false;
+        if (hdfs != null) {
+            try {
+                hdfs.write(empresaId, nombre, tsMillis, cpu, ram, disco, temp, bateria,
+                        ramTxt, almTxt, str(r, "procesador"), stress);
+                hdfsOk = true;
+            } catch (Exception e) {
+                System.err.println("   [HDFS] write falló (Cassandra OK): " + e.getMessage());
+            }
+        }
+
+        System.out.printf("   [OK] %s (empresa %d) stress=%.1f -> Cassandra%s%n",
+                nombre, empresaId, stress, hdfsOk ? " + HDFS" : "");
     }
 
     // --- Helpers de extracción de GenericRecord ---
