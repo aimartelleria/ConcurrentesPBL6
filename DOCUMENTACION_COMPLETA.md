@@ -51,7 +51,7 @@ La arquitectura está formada por varios subsistemas especializados que operan d
 ```
 
 ### Componentes Clave:
-1. **Source (Agente Go):** Obtiene datos del sistema operativo y genera cargas útiles (*payloads*), que envía por HTTP al gateway de ingesta.
+1. **Source (Agente Go):** Obtiene datos del sistema operativo y genera cargas útiles (*payloads*), que envía por HTTP al gateway de ingesta. Recoge CPU, RAM, disco, temperatura y **batería** (`bateria_percent`, porcentaje 0-100, `double` *nullable*: `null` en equipos sin batería; vía *sysfs* en Linux y WMI en Windows).
 2. **Gateway de ingesta (Apache NiFi):** Se sitúa entre los agentes y Kafka. Autentica a cada collector por su **licencia** contra la BD de la aplicación (MySQL: tabla `licencia`, `activa = 1`), serializa a Avro gobernado por Schema Registry y publica en Kafka. Las licencias inactivas o inexistentes se rechazan con **HTTP 401**. (Detalle completo en `NIFI_GATEWAY.md`.)
 3. **Buffer (Kafka):** Desacopla la emisión de datos de la capacidad y velocidad de procesamiento del cluster de Java. El topic `telemetry` transporta Avro con Schema Registry.
 4. **Edge / Entrypoint (Cliente Java, `rmi-client`):** Actúa como un puente. Consume de Kafka con `KafkaAvroDeserializer`, calcula el StressScore vía RMI (balanceo Round-Robin tolerante a fallos) y persiste en Cassandra. Usa **ack manual** (`commitSync` con `enable.auto.commit=false`) y **dead-letter** (`telemetry.DLT`) para garantía *at-least-once*.
@@ -113,7 +113,7 @@ Para la comunicación en el interior del cluster.
 
 Para empaquetar cómo coopera todo, este es el viaje de 1 milisegundo de tu aplicación:
 
-1. **[GO]** Un sensor en el Agente de Go detecta que la CPU local está al 90%. Empaqueta esta información.
+1. **[GO]** Un sensor en el Agente de Go detecta que la CPU local está al 90% y captura el resto de métricas (RAM, disco, temperatura y **batería** `bateria_percent`, `null` si el equipo no tiene batería). Empaqueta esta información.
 2. **[GO -> NIFI]** Go envía la métrica por HTTP POST al gateway de NiFi, incluyendo las cabeceras de licencia (`X-License-Code`, `X-Portatil`).
 3. **[NIFI]** NiFi verifica la licencia contra MySQL (`licencia.activa = 1`). Si es inválida, responde **HTTP 401** y descarta el dato. Si es válida, serializa a **Avro** (gobernado por Schema Registry) y publica en el topic `telemetry` de Kafka (HTTP 200 al agente).
 4. **[BROKER]** Kafka almacena el paquete y se asegura de que exista persistencia y replicación.

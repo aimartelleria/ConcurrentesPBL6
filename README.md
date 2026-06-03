@@ -23,7 +23,7 @@ list of seeds (any one alive is enough). Killing any subset short of
 ## Design
 
 **End-to-end telemetry pipeline.** A Go collector agent on each user machine
-measures CPU/RAM/disk/temperature and sends it via HTTP POST to an **Apache
+measures CPU/RAM/disk/temperature/battery and sends it via HTTP POST to an **Apache
 NiFi** ingestion gateway with license headers (`X-License-Code`, `X-Portatil`)
 — it no longer publishes to Kafka directly. NiFi validates the agent's license
 against MySQL (must be active), enriches with `empresa_id`/`nombre`, serializes

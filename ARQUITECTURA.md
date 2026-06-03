@@ -44,7 +44,7 @@ El cluster RMI es el motor de cómputo dentro de un pipeline de telemetría más
 │  Agente Go   │  X-License-Code │   Apache NiFi        │  + Schema  │ Apache Kafka │
 │ (collector)  │ ──────────────► │  (gateway ingesta)   │ ─Registry─►│ topic        │
 │ CPU/RAM/disco│  X-Portatil     │ valida licencia      │  Registry  │ "telemetry"  │
-│ temperatura  │                 │ vs MySQL (activa),   │            │ 9092/9094    │
+│ temp/batería │                 │ vs MySQL (activa),   │            │ 9092/9094    │
 └──────────────┘                 │ serializa a Avro,    │            └──────┬───────┘
                                   │ enriquece empresa_id │                   │
                                   │ y nombre_ordenador,  │                   │ KafkaConsumer
@@ -70,12 +70,12 @@ El cluster RMI es el motor de cómputo dentro de un pipeline de telemetría más
 
 ### Componentes del pipeline
 
-1. **Agente Go (collector)**: mide CPU/RAM/disco/temperatura. Ya **no** publica directo a Kafka: hace `HTTP POST` a un gateway Apache NiFi con cabeceras de licencia (`X-License-Code` = código, `X-Portatil`).
+1. **Agente Go (collector)**: mide CPU/RAM/disco/temperatura/batería (`bateria_percent`, 0-100, nullable: `null` en equipos sin batería). Ya **no** publica directo a Kafka: hace `HTTP POST` a un gateway Apache NiFi con cabeceras de licencia (`X-License-Code` = código, `X-Portatil`).
 2. **Apache NiFi (gateway de ingesta)**: valida la licencia del agente contra la BD de aplicación en **MySQL** (debe estar activa), serializa a **Avro** usando un **Schema Registry**, enruta los válidos a Kafka y rechaza los inválidos. Enriquece con `empresa_id` y `nombre` (`nombre_ordenador`).
 3. **Apache Kafka** (topic `telemetry`, 9092 interno / 9094 externo): bus asíncrono. Avro en el cable con **Schema Registry** (Confluent/Apicurio) como fuente única del esquema.
 4. **Client Java (rmi-client)**: `KafkaConsumer` con `KafkaAvroDeserializer`. **ACK MANUAL** (commit del offset solo tras procesar el lote) + **DEAD-LETTER** (topic `telemetry.DLT`) ⇒ entrega **at-least-once**. Calcula el StressScore en el cluster por RMI y **persiste en Cassandra** (keyspace `webhardmon`, tabla `mediciones`).
 5. **Cluster RMI (rmi-server x3)**: P2P sin punto único de fallo, descubrimiento por gossip, **Virtual Threads (Java 21)**. Ejecuta `StressTask`.
-6. **Almacenamiento**: **Cassandra** (`mediciones` = serie temporal, `ordenadores` = inventario, `empresas`) y **MySQL** = BD de la aplicación (empresa, administrador, usuario, licencia) y autenticación de agentes por licencia.
+6. **Almacenamiento**: **Cassandra** (`mediciones` = serie temporal con CPU/RAM/disco/temperatura/batería —`bateria_percent` (double, nullable)— replicada también en HDFS, `ordenadores` = inventario, `empresas`) y **MySQL** = BD de la aplicación (empresa, administrador, usuario, licencia) y autenticación de agentes por licencia.
 
 ### Middleware
 

@@ -10,7 +10,8 @@ Este documento explica cómo funciona el flujo de datos entre el agente de monit
 ┌────────────────┐   HTTP POST    ┌──────────────┐   Avro    ┌──────────────┐
 │   Agente Go    │ ──(X-License──►│  Apache NiFi │ ──+SR───► │ Apache Kafka │
 │ (Métricas CPU/ │     Code)      │  (Gateway de │           │  (topic      │
-│  RAM/Disk/Temp)│                │   ingesta)   │           │  "telemetry")│
+│ RAM/Disk/Temp/ │                │   ingesta)   │           │  "telemetry")│
+│    Batería)    │                │              │           │              │
 └────────────────┘                └──────┬───────┘           └──────┬───────┘
                                   Valida  │ licencia (MySQL)         │
                                   Enriquece (empresa_id, nombre)     │ KafkaConsumer
@@ -31,7 +32,7 @@ Este documento explica cómo funciona el flujo de datos entre el agente de monit
                                                   StressScore    ──persiste──►
 ```
 
-1. **Agente Go (collector)**: Inspecciona el sistema operativo usando `gopsutil` en intervalos regulares (CPU/RAM/Disco/Temperatura) y envía cada lectura mediante **HTTP POST** al gateway de ingesta **Apache NiFi**, incluyendo cabeceras de licencia (`X-License-Code` = código y `X-Portatil`). Ya no publica directamente en ningún broker.
+1. **Agente Go (collector)**: Inspecciona el sistema operativo usando `gopsutil` en intervalos regulares (CPU/RAM/Disco/Temperatura/Batería) y envía cada lectura mediante **HTTP POST** al gateway de ingesta **Apache NiFi**, incluyendo cabeceras de licencia (`X-License-Code` = código y `X-Portatil`). Ya no publica directamente en ningún broker.
 2. **Apache NiFi (gateway de ingesta)**: Valida la licencia recibida contra **MySQL** (debe estar activa), enriquece el registro con `empresa_id` y `nombre`, serializa la métrica a **Avro** apoyándose en el **Schema Registry**, enruta los mensajes válidos al topic de **Kafka** y rechaza los inválidos.
 3. **Apache Kafka (topic `telemetry`)**: Actúa como bus asíncrono entre la ingesta y el procesamiento. Los mensajes viajan en **Avro** con gobierno de esquema vía **Schema Registry** (puerto 9092 interno / 9094 externo).
 4. **Cliente Java (`rmi-client`)**: Un `KafkaConsumer` con `KafkaAvroDeserializer` consume el topic `telemetry`. Usa **ACK manual** (hace commit del offset tras procesar correctamente el lote) y una cola **dead-letter** (`telemetry.DLT`), garantizando semántica *at-least-once*. Actúa como puente ("bridge") despachando cada métrica al cluster Java mediante llamadas **RMI**.
@@ -39,7 +40,7 @@ Este documento explica cómo funciona el flujo de datos entre el agente de monit
    - Cada nodo hospeda su propio registro RMI de forma distribuida (P2P, sin un servidor central ni SPOF).
    - Utilizan un protocolo de **Gossip (chisme)** periódico en segundo plano para informarse mutuamente qué nodos están vivos o cuáles han caído (evicción).
    - Al recibir el paquete Avro, calculan un **Stress Score** en paralelo mediante **Virtual Threads** (Java 21).
-6. **Persistencia (Cassandra)**: Una vez calculado el Stress Score, el cliente **persiste la medición en Cassandra** (keyspace `webhardmon`, tabla `mediciones`). MySQL queda como base de datos de la aplicación (empresa, administrador, usuario, licencia) y soporte de autenticación por licencia.
+6. **Persistencia (Cassandra)**: Una vez calculado el Stress Score, el cliente **persiste la medición en Cassandra** (keyspace `webhardmon`, tabla `mediciones`), incluyendo el campo `bateria_percent` (`double` nullable, `null` en equipos sin batería) junto a CPU, RAM, disco y temperatura; la medición también se vuelca a **HDFS**. MySQL queda como base de datos de la aplicación (empresa, administrador, usuario, licencia) y soporte de autenticación por licencia.
 
 ---
 
@@ -102,7 +103,7 @@ El Agente Go recopila las métricas de hardware del sistema:
 ```text
 Iniciando servicio de recolección métricas en segundo plano...
 Se enviarán métricas a NiFi/Kafka cada 5 minutos.
-[2026-05-20 08:42:58] Datos recolectados normales: {Timestamp:1779266578 CPUPercent:1.182327318355726 CPUModel:12th Gen Intel(R) Core(TM) i7-12650H RAMPercent:23.011672656562755 RAMTotal:8175046656 DiskPercent:9.89245871010225 DiskTotal:1081101176832 Temp:<nil>}
+[2026-05-20 08:42:58] Datos recolectados normales: {Timestamp:1779266578 CPUPercent:1.182327318355726 CPUModel:12th Gen Intel(R) Core(TM) i7-12650H RAMPercent:23.011672656562755 RAMTotal:8175046656 DiskPercent:9.89245871010225 DiskTotal:1081101176832 Temp:<nil> BateriaPercent:87.5}
 [2026-05-20 08:42:58] datos enviados correctamente a NiFi/Kafka
 ```
 * **Interpretación**: Indica que el recolector de Go accedió al hardware del host (o contenedor) y envió la lectura por HTTP POST a NiFi, que validó la licencia, la serializó en formato Avro (con Schema Registry) y la publicó exitosamente en el topic `telemetry` de Kafka.
@@ -115,12 +116,14 @@ El nodo que recibe la llamada RMI ejecuta el pipeline ETL y visualiza la informa
   - RAM Total: 7,61 GB (23,01%)
   - Disk Total: 1006,85 GB (9,89%)
   - Temp: N/A
+  - Batería: 87,5%
   - Stress Score: 11,66 / 100
 ```
 * **Interpretación**: 
   - La llamada RMI funcionó correctamente y deserializó el registro Avro completo.
   - Las capacidades de memoria y disco se convirtieron de bytes a Gigabytes (GB) de forma legible para el operador (`7,61 GB` y `1006,85 GB`).
   - La temperatura se muestra como `N/A` porque el agente de Go se ejecuta dentro de un contenedor virtualizado (Docker Desktop en Windows) donde la interfaz térmica de Linux no está disponible.
+  - La **batería** (`bateria_percent`, porcentaje 0-100) se recoge junto con CPU/RAM/disco/temperatura; aparece como `null` (mostrado `N/A`) en equipos sin batería (p. ej. sobremesas o servidores). En este ejemplo el portátil reporta `87,5%`.
   - El **Stress Score** de `11,66 / 100` se calculó usando la ponderación: `(1,18% * 0.4) + (23,01% * 0.4) + (9,89% * 0.2)`. 
 
 ### Comportamiento ante Caídas (Failover RMI)
@@ -178,7 +181,7 @@ Esta prueba distribuye **150 tareas del pipeline de Stress Score (Modelo a Trozo
 #### 1. Pruebas de Concurrencia de un Nodo (Local)
 * **Clase de ejecución**: [`Benchmark.java`](file:///c:/Users/aimar/Downloads/files/client/src/main/java/cluster/Benchmark.java) en el submódulo `client` (método `runLocalBenchmark()`).
 * **Lógica interna de simulación (Modelo a Trozos / Piecewise)**:
-  * Cada una de las 500 tareas simula el procesamiento de una ventana temporal de **1.000 muestras de telemetría** generadas con ruido gaussiano (fluctuaciones realistas de CPU, RAM, Disco y Temperatura).
+  * Cada una de las 500 tareas simula el procesamiento de una ventana temporal de **1.000 muestras de telemetría** generadas con ruido gaussiano (fluctuaciones realistas de CPU, RAM, Disco, Temperatura y Batería).
   * Para cada muestra calcula el **Stress Score** aplicando el **Modelo a Trozos**: media ponderada `(0.35·CPU + 0.30·Temp + 0.20·RAM + 0.15·Disco)` con **Hard Override** cuando `max(CPU, Temp) ≥ 90%`, siguiendo la metodología USE de Brendan Gregg.
   * Aplica suavizado **EWMA** (Exponential Weighted Moving Average, α=0.3) sobre la serie temporal de scores.
   * Calcula estadísticas (media, desviación típica) y percentiles **P95/P99** mediante ordenación `Arrays.sort()` (complejidad O(n log n)).

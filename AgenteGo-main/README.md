@@ -9,8 +9,9 @@ El script realiza estos pasos:
 1. Obtiene métricas del equipo.
 2. Calcula el uso de CPU, RAM y disco.
 3. Intenta leer la temperatura del sistema con varias fuentes.
-4. Serializa todo usando Apache Avro de manera eficiente.
-5. Publica el resultado en Kafka en el topic `telemetry`.
+4. Intenta leer el nivel de batería del equipo.
+5. Serializa todo usando Apache Avro de manera eficiente.
+6. Publica el resultado en Kafka en el topic `telemetry`.
 
 ## Requisitos
 
@@ -37,7 +38,8 @@ El mensaje enviado a Kafka está codificado en formato Avro binario. Al deserial
   "ram_total": 17179869184,
   "disk_percent": 71.8,
   "disk_total": 512110190592,
-  "temp_c": 45.3
+  "temp_c": 45.3,
+  "bateria_percent": 87.0
 }
 ```
 
@@ -51,6 +53,7 @@ El mensaje enviado a Kafka está codificado en formato Avro binario. Al deserial
 - `disk_percent`: porcentaje de disco usado.
 - `disk_total`: total de disco en bytes.
 - `temp_c`: temperatura en grados Celsius. Puede ser `null` si no se pudo detectar.
+- `bateria_percent`: porcentaje de carga de la batería (0-100). Puede ser `null` en equipos sin batería (sobremesas/servidores).
 
 ## Cómo funciona la temperatura
 
@@ -61,6 +64,14 @@ La lectura de temperatura es mejor esfuerzo:
 - Si no encuentra un valor válido, deja `temp_c` en `null`.
 
 Esto significa que la temperatura puede no estar disponible en todos los equipos, especialmente si el hardware o los permisos no permiten acceder al sensor.
+
+## Cómo funciona la batería
+
+La lectura de batería también es mejor esfuerzo y depende del sistema operativo:
+
+- En Linux se lee vía sysfs (`/sys/class/power_supply/BATx/capacity`).
+- En Windows se consulta `Win32_Battery` mediante WMI/PowerShell.
+- En equipos sin batería (sobremesas/servidores) o si no se puede obtener un valor válido, `bateria_percent` viaja como `null`.
 
 ## Configuración
 
