@@ -97,12 +97,14 @@ ansible-playbook -i ansible/inventory.ini ansible/site.yml
 - **Replayer de la dead-letter** (reprocesar `telemetry.DLT` al recuperarse el clúster).
 - `ClusterNode.processTelemetry(byte[])` es legacy (sin batería); el camino activo es `executeTask`.
 
-## 🔴 ACTUALIZACIÓN CRÍTICA — esquema canónico del equipo (¡realinear el Java!)
+## 🔴 ACTUALIZACIÓN CRÍTICA — contrato gobernado por `client` (ajustar NiFi, NO el Java)
 El compañero subió TODOS los roles base + nifi + mapreduce (infra HEAD movió a `3c41373`).
-Y nos dio el **esquema canónico REAL** del payload (NiFi/Kafka/Parquet/MapReduce), que **NO
-coincide** con el de mi código Java. Hay que reconciliarlo en la sesión nueva.
+**Decisión:** como **manejamos nosotros NiFi**, la fuente de verdad del contrato es **`client`**
+(el bridge Java) y **ajustamos NiFi para que emita los nombres que `client` lee** — sin perder
+datos. El esquema "canónico" que circuló antes queda abajo como referencia de qué campos había,
+pero los **nombres** se realinean a los de `client` (ver `ARQUITECTURA_FLUJO.md`).
 
-**Esquema canónico (ya actualizado en `schemas/telemetry.avsc` y `NIFI_GATEWAY.md`):**
+**Esquema que circuló (referencia; los nombres se realinean a `client`):**
 `licencia(str), portatil(str), timestamp(long ms), uso_procesador, uso_ram, cantidad_ram,
 uso_almacenamiento, cantidad_almacenamiento, bateria, temperatura, stressScore, empresa_id(int, default 0)`
 
@@ -111,18 +113,34 @@ portatil, activa, empresa_id)`. NiFi valida + saca empresa_id con:
 `SELECT l.activa, l.empresa_id FROM licencia l WHERE l.codigo=:licencia AND l.portatil=:portatil`.
 Conexión NiFi→MySQL: `10.0.0.30:3307` (WireGuard), Schema Registry `10.0.0.20:8081`.
 
-**Arquitectura aclarada:** NiFi escribe el **Parquet en HDFS** (no mi bridge), y `stressScore`
-va EN el payload (lo calcula el servidor RMI). → revisar si mi `HdfsParquetWriter` y el rol del
-bridge siguen teniendo sentido o son redundantes.
+**✅ Arquitectura ACLARADA (corrige lo que decía este doc antes — ver `ARQUITECTURA_FLUJO.md`):**
+- Flujo: `Agente → NiFi (valida licencia + enriquece empresa_id) → Kafka(Avro) → Bridge →
+  RMI(stressScore) → Cassandra (hot) + HDFS Parquet (batch)`.
+- El **`stressScore` NO viaja en el payload**: lo calcula el **clúster RMI**, disparado por el
+  **bridge** tras consumir de Kafka (`Client.java:executeTask(new StressTask(...))`). → el RMI del bridge SE QUEDA.
+- **NiFi NO escribe el Parquet**. Lo escribe el **bridge** después del RMI
+  (`HdfsParquetWriter`). → `HdfsParquetWriter` SE QUEDA (no es redundante).
+- **Ubicación por nube:** Cassandra + Kafka + SR + bridge + RMI en **GCP-A**; NiFi + MySQL +
+  **HDFS** en la **local** (bridge escribe HDFS cruzando por WireGuard); web + Grafana en **GCP-B**.
+- **NiFi lo manejamos nosotros** → la **fuente de verdad del contrato es `client`**: NiFi emite
+  los campos con los nombres que el bridge lee (no al revés). **No se pierde ningún dato**
+  (`procesador`, textos de RAM/almacenamiento se mantienen).
 
-**TODO realineamiento (sesión nueva):**
-1. `client/Client.java`: leer los campos canónicos (`uso_procesador`, `cantidad_ram`, `portatil`,
-   `stressScore`, `empresa_id`…) en vez de `cpu_percent`/`nombre`/`stress_score`.
-2. `db/init.sql`: pasar al modelo plano `licencia(codigo,portatil,activa,empresa_id)` en `webhardmon`
-   (quitar el `usuario`/`licencia_lookup` actual) — o confirmar con el equipo (hay versiones MySQL en conflicto).
-3. Cassandra `mediciones`: decidir mapeo de columnas a los nombres canónicos (o mapear en el cliente).
-4. `HdfsParquetWriter`: ¿se elimina (NiFi escribe Parquet) o se alinea a los campos canónicos? DECIDIR.
-5. Confirmar dónde se calcula `stressScore` (¿colector llama a RMI?, ¿bridge?) — afecta al rol del bridge.
+**Realineamiento — ESTADO (decidido: fuente de verdad = `client`, modelo MySQL relacional):**
+1. ✅ HECHO — `schemas/telemetry.avsc` reescrito con los nombres que `client` lee (`empresa_id long`,
+   `nombre`, `ts(ms)`, `cpu_percent`, `ram_percent`, `disco_percent`, `temperatura?`, `bateria_percent?`,
+   `ram(texto)`, `almacenamiento(texto)`, `procesador?`). SIN `stressScore` (no es campo de ingesta).
+   Mapeo que NiFi debe aplicar (incl. `ts` ×1000 seg→ms y `ram`/`almacenamiento` bytes→texto) documentado
+   en `NIFI_GATEWAY.md`. Como manejamos NiFi, se ajusta NiFi → client.
+2. ✅ DECIDIDO — se mantiene el **modelo MySQL relacional** (`db/init.sql`: empresa/usuario/licencia +
+   vista `licencia_lookup`). NiFi resuelve `empresa_id` + `nombre` (= `nombre_ordenador`) por `codigo`.
+   El `nombre` de Cassandra sale de MySQL, NO de la cabecera `X-Portatil` (que es cross-check). Sin cambios en `init.sql`.
+3. ✅ OK — Cassandra `mediciones` y `client/Client.java` ya estaban alineados con esos nombres; sin cambios.
+4. ✅ RESUELTO — `HdfsParquetWriter` SE MANTIENE (lo escribe el bridge tras RMI, no NiFi).
+5. ✅ RESUELTO — `stressScore` se calcula en RMI disparado por el bridge; el rol del bridge se mantiene.
+
+> MapReduce alineado: el job lee el Parquet de `HdfsParquetWriter` y parsea `ram`/`almacenamiento`
+> en texto ("16 GB") a GB numéricos para el tier batch. Ver `NIFI_GATEWAY.md`.
 
 ## Última acción en esta ventana
 1. Deshecho el commit `efc8b39` de la infra (reset `aa0b19e` + `--force-with-lease`) para no solapar.

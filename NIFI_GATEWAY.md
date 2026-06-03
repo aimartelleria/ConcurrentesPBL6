@@ -1,69 +1,82 @@
-# 🛡️ Gateway de ingesta NiFi — flujo y enriquecimiento de `empresa_id`
+# 🛡️ Gateway de ingesta NiFi — flujo y enriquecimiento (`empresa_id` + `nombre`)
 
 NiFi corre en un **CT LXC de la nube local (Proxmox)**. Recibe la telemetría de los
-portátiles por **HTTP (Cloudflare Tunnel → listener 8081)** y la valida, enriquece,
-publica en Kafka (Avro) y la escribe en HDFS (Parquet). El flujo se construye en la
-**UI de NiFi** (el rol de Ansible solo despliega el contenedor + cloudflared).
+portátiles por **HTTP (Cloudflare Tunnel → listener 8081)**, la valida, la enriquece y
+la publica en **Kafka (Avro)**. El flujo se construye en la **UI de NiFi** (el rol de
+Ansible solo despliega el contenedor + cloudflared).
+
+> **Fuente de verdad = el bridge Java (`client/Client.java`).** NiFi (que manejamos nosotros)
+> emite el Avro con los **nombres de campo que el bridge lee**, no al revés. El **stressScore
+> NO lo añade NiFi**: lo calcula el clúster RMI (disparado por el bridge) y el **bridge** escribe
+> Cassandra + **HDFS Parquet**. NiFi NO escribe el Parquet.
 
 ## Flujo (el que debe estar montado en la UI)
 1. **Escucha HTTP POST** con payload JSON del colector (`ListenHTTP`/`HandleHttpRequest`, puerto 8081).
-2. **Valida la licencia contra MySQL** (LookupService JDBC) y **obtiene `empresa_id`** en la misma consulta:
+   La licencia (`codigo`) y el identificador de portátil viajan en cabeceras `X-License-Code` / `X-Portatil`.
+2. **Valida la licencia y resuelve `empresa_id` + `nombre`** contra MySQL (LookupService JDBC) usando la
+   vista `licencia_lookup` (resuelve el JOIN `licencia → usuario` por `codigo`):
    ```sql
-   SELECT l.activa, l.empresa_id
-   FROM licencia l
-   WHERE l.codigo = :licencia AND l.portatil = :portatil
+   SELECT activa, empresa_id, nombre
+   FROM licencia_lookup
+   WHERE codigo = :licencia
    ```
-   - Descarta el registro si `activa != 1`.
-3. **Enriquece** el registro con `empresa_id` (atributo del FlowFile y/o campo del record),
-   para que esté disponible en los pasos siguientes.
+   - Descarta el registro si `activa != 1` (responde 401/403 al colector).
+   - El `nombre` devuelto es el `nombre_ordenador` canónico de la BD (NO la cabecera `X-Portatil`,
+     que solo sirve de cross-check).
+3. **Enriquece + mapea** el record a los campos que lee el bridge:
+   | Campo Avro | Origen | Transformación en NiFi |
+   |---|---|---|
+   | `empresa_id` | MySQL `licencia_lookup` | directo (long) |
+   | `nombre` | MySQL `licencia_lookup` (`nombre_ordenador`) | directo |
+   | `ts` | colector `Timestamp` (Unix **segundos**) | **×1000 → milisegundos** |
+   | `cpu_percent` | colector `CPUPercent` | directo |
+   | `ram_percent` | colector `RAMPercent` | directo |
+   | `disco_percent` | colector `DiskPercent` | directo |
+   | `temperatura` | colector `Temp` | directo (nullable) |
+   | `bateria_percent` | colector `BateriaPercent` | directo (nullable) |
+   | `ram` | colector `RAMTotal` (bytes) | **formatear a texto** (p.ej. "16 GB") |
+   | `almacenamiento` | colector `DiskTotal` (bytes) | **formatear a texto** (p.ej. "512 GB") |
+   | `procesador` | colector `CPUModel` | directo (nullable) |
 4. **Serializa a Avro** contra el **Confluent Schema Registry** y publica en **Kafka** (`telemetry`).
-5. **Escribe el registro en HDFS** en **Parquet** (capa batch del patrón Lambda).
 
-> `empresa_id` debe ir **en el Avro de Kafka Y en el Parquet de HDFS** — es la dimensión
-> de agrupación que usa el job MapReduce. Sin él, el batch layer no agrupa por empresa.
+> El `stressScore` y la escritura en **Cassandra + HDFS Parquet** ocurren **aguas abajo, en el bridge**
+> (tras el cálculo RMI). NiFi termina su trabajo al publicar en Kafka.
 
 ## Conectividad MySQL (desde el CT de NiFi, vía WireGuard)
 | | Valor |
 |---|---|
 | Host | `10.0.0.30` (gateway GCP-B) → rutea a `10.30.2.11` |
 | Puerto | `3307` (el contenedor MySQL mapea 3307→3306) |
-| BD | `webhardmon` |
+| BD | `telemetriadb` |
 | Usuario/clave | `mysql_app_user` / `mysql_app_password` (rol Ansible de MySQL, por vault) |
 
-## Esquema MySQL relevante
+## Esquema MySQL relevante (modelo relacional — ver `db/init.sql`)
 ```sql
-CREATE TABLE empresa  ( id INT PRIMARY KEY AUTO_INCREMENT, nombre VARCHAR(255) );
-CREATE TABLE licencia ( id INT PRIMARY KEY AUTO_INCREMENT,
-                        codigo VARCHAR(255) UNIQUE,   -- API key del colector
-                        portatil VARCHAR(255),        -- hostname del portátil
-                        activa TINYINT(1) DEFAULT 1,
-                        empresa_id INT,
-                        FOREIGN KEY (empresa_id) REFERENCES empresa(id) );
+-- empresa(id, nombre)
+-- usuario(id, nombre, nombre_ordenador, empresa_id)   -- nombre_ordenador == `nombre` en Cassandra
+-- licencia(id, codigo, activa, fecha_creacion, usuario_id)
+-- Vista para NiFi (una sola clave: codigo):
+CREATE OR REPLACE VIEW licencia_lookup AS
+SELECT l.codigo, l.activa, u.empresa_id, u.nombre_ordenador AS nombre
+FROM licencia l JOIN usuario u ON u.id = l.usuario_id;
 ```
-(Modelo **plano**: `licencia` lleva `codigo`, `portatil`, `activa` y `empresa_id` directamente.)
+NiFi consulta **`licencia_lookup`** por `codigo`: valida (`activa=1`) y obtiene `empresa_id` + `nombre`
+en la misma consulta, sin llamar a la API Java.
 
-## Esquema Avro canónico (Schema Registry, 10.0.0.20:8081, compat BACKWARD)
-Ver **`schemas/telemetry.avsc`**. Campos del payload del colector + el añadido:
-`licencia, portatil, timestamp(ms), uso_procesador, uso_ram, cantidad_ram,
-uso_almacenamiento, cantidad_almacenamiento, bateria, temperatura, stressScore`
-y **nuevo**:
-```json
-{ "name": "empresa_id", "type": "int", "default": 0, "doc": "ID de la empresa propietaria del portátil" }
-```
-El `default: 0` es **imprescindible** para no romper consumidores existentes (compat BACKWARD).
+## Esquema Avro (Schema Registry, 10.0.0.20:8081, compat BACKWARD)
+Ver **`schemas/telemetry.avsc`** (alineado con el bridge). Campos:
+`empresa_id(long, default 0), nombre, ts(ms), cpu_percent, ram_percent, disco_percent,
+temperatura?, bateria_percent?, ram(texto), almacenamiento(texto), procesador?`.
+El `default: 0` de `empresa_id` mantiene compat BACKWARD. **No hay `stressScore` en este topic.**
 
-## Expectativa del job MapReduce (downstream)
-Agrupa los Parquet por:
+## Nota MapReduce (downstream, capa batch del compañero)
+El job MapReduce lee el Parquet que escribe `HdfsParquetWriter` y agrupa por empresa + hardware + hora:
 ```
-{empresa_id}|{cantidad_ram redondeada a GB}|{cantidad_almacenamiento redondeada a GB}|{yyyyMMddHH UTC}
+{empresa_id}|{ram}|{almacenamiento}|{yyyyMMddHH UTC}
 ```
-→ por eso `empresa_id` **debe** estar en el Parquet.
+En este contrato `ram`/`almacenamiento` son **texto** (p.ej. "16 GB"). El mapper los parsea a GB
+numéricos para construir el tier (`ramGb`/`stoGb`) y escribir los agregados en HBase.
 
 ## Despliegue (rol Ansible)
 El rol `ansible/roles/nifi` (repo de infra) levanta el contenedor NiFi (UI 8080, ingesta 8081)
 + cloudflared (túnel saliente). El **flujo de arriba se importa/monta en la UI** — no está en el rol.
-
-> ⚠️ **Pendiente de realinear (consumidor Java):** el esquema canónico de arriba usa
-> `uso_procesador`/`cantidad_ram`/`portatil`/`stressScore`/`empresa_id(int)`, distinto de los
-> nombres que aún usan `client/Client.java`, `HdfsParquetWriter` y la tabla Cassandra `mediciones`
-> (`cpu_percent`/`ram`/`nombre`/`stress_score`/`empresa_id long`). Hay que reconciliarlo (ver TRASPASO.md).

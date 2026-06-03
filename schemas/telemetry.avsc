@@ -2,19 +2,18 @@
   "type": "record",
   "name": "Telemetry",
   "namespace": "com.webhardmon",
-  "doc": "Registro de telemetría CANÓNICO del equipo (colector -> NiFi -> Kafka Avro + HDFS Parquet). NiFi enriquece empresa_id desde MySQL antes de publicar. Registrado en el Schema Registry (10.0.0.20:8081, compat BACKWARD).",
+  "doc": "Registro de telemetría de INGESTA (colector Go -> NiFi -> Kafka Avro). Fuente de verdad = el bridge Java (client/Client.java): los nombres de campo son los que el bridge lee. NiFi valida la licencia contra MySQL (vista licencia_lookup) y ENRIQUECE empresa_id + nombre (nombre_ordenador) desde la BD antes de publicar. El stressScore NO viaja en este topic: lo calcula el clúster RMI (disparado por el bridge) y el bridge lo persiste en Cassandra (hot) + HDFS Parquet (batch). Registrado en el Schema Registry (10.0.0.20:8081, compat BACKWARD).",
   "fields": [
-    { "name": "licencia",                "type": "string", "doc": "código de licencia (API key del colector)" },
-    { "name": "portatil",                "type": "string", "doc": "hostname del portátil" },
-    { "name": "timestamp",               "type": "long",   "doc": "epoch ms UTC" },
-    { "name": "uso_procesador",          "type": "double", "doc": "% uso CPU" },
-    { "name": "uso_ram",                 "type": "double", "doc": "% uso RAM" },
-    { "name": "cantidad_ram",            "type": "double", "doc": "GB totales de RAM (8, 16, 32...)" },
-    { "name": "uso_almacenamiento",      "type": "double", "doc": "% uso disco" },
-    { "name": "cantidad_almacenamiento", "type": "double", "doc": "GB totales de disco (256, 512...)" },
-    { "name": "bateria",                 "type": "double", "doc": "% batería" },
-    { "name": "temperatura",             "type": "double", "doc": "ºC" },
-    { "name": "stressScore",             "type": "double", "doc": "índice 0-100 calculado por el servidor RMI" },
-    { "name": "empresa_id",              "type": "int", "default": 0, "doc": "ID de la empresa propietaria; enriquecido por NiFi desde MySQL (default 0 -> compat BACKWARD)" }
+    { "name": "empresa_id",      "type": "long",   "default": 0, "doc": "ID de la empresa propietaria; enriquecido por NiFi desde MySQL (licencia_lookup). Default 0 -> compat BACKWARD. Cassandra: bigint." },
+    { "name": "nombre",          "type": "string", "doc": "identificador canónico del equipo = nombre_ordenador en MySQL (lo inyecta NiFi desde licencia_lookup, NO la cabecera X-Portatil). Clustering key en Cassandra." },
+    { "name": "ts",              "type": "long",   "doc": "epoch en MILISEGUNDOS UTC. El colector envía segundos (time.Now().Unix()); NiFi convierte a ms (×1000)." },
+    { "name": "cpu_percent",     "type": "double", "doc": "% uso CPU" },
+    { "name": "ram_percent",     "type": "double", "doc": "% uso RAM" },
+    { "name": "disco_percent",   "type": "double", "doc": "% uso disco" },
+    { "name": "temperatura",     "type": ["null", "double"], "default": null, "doc": "ºC; nullable (sensor no siempre disponible)" },
+    { "name": "bateria_percent", "type": ["null", "double"], "default": null, "doc": "% batería; nullable (equipos de sobremesa sin batería)" },
+    { "name": "ram",             "type": "string", "doc": "RAM total formateada (p.ej. \"16 GB\"); NiFi la formatea desde RAMTotal (bytes) del colector. Texto en Cassandra/HDFS." },
+    { "name": "almacenamiento",  "type": "string", "doc": "Almacenamiento total formateado (p.ej. \"512 GB\"); NiFi lo formatea desde DiskTotal (bytes) del colector. Texto en Cassandra/HDFS." },
+    { "name": "procesador",      "type": ["null", "string"], "default": null, "doc": "modelo de CPU (CPUModel del colector); nullable." }
   ]
 }
