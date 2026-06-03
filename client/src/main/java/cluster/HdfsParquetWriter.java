@@ -59,6 +59,10 @@ public class HdfsParquetWriter implements Closeable {
         this.conf = new Configuration();
         conf.set("fs.defaultFS", this.hdfsUri);
         conf.setInt("dfs.replication", 2);
+        // El clúster expone los DataNodes por hostname (dfs.datanode.hostname = su IP).
+        // Un cliente externo (gcp-a) DEBE conectarse por hostname, o el NameNode le
+        // devolvería la IP interna de Docker del DataNode y el write fallaría.
+        conf.set("dfs.client.use.datanode.hostname", "true");
     }
 
     /** Escribe una medición enriquecida. Particiona por el día de {@code tsMillis}. */
