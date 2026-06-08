@@ -1364,8 +1364,10 @@ Esta prueba distribuye **150 tareas del pipeline de Stress Score (Modelo a Trozo
 ```mermaid
 flowchart LR
     AG["Agente Go<br/>CPU·RAM·disco·temp·bateria"]
+    CF{{"Cloudflare Tunnel<br/>balancea entre conectores sanos"}}
     subgraph LOCAL["Nube local (Proxmox)"]
-        NIFI["NiFi gateway<br/>valida licencia + empresa_id"]
+        NIFI["Clúster NiFi HA x3<br/>cloudflared en cada nodo<br/>valida licencia + empresa_id"]
+        ZK["ZooKeeper local x3<br/>coordina el clúster NiFi"]
         MYSQL[("MySQL<br/>telemetriadb")]
         HDFS[("HDFS Parquet<br/>/data/telemetry")]
         REGL["Docker Registry (Harbor)"]
@@ -1383,7 +1385,9 @@ flowchart LR
         GRAF["Grafana"]
         REGB["Docker Registry"]
     end
-    AG -->|"JSON + X-License-Code<br/>Cloudflare Tunnel"| NIFI
+    AG -->|"JSON + X-License-Code"| CF
+    CF -->|"reparte la carga"| NIFI
+    NIFI -.->|"coordinación HA"| ZK
     NIFI -->|"lookup licencia"| MYSQL
     NIFI -->|"Avro"| KAFKA
     KAFKA -.-> SR
@@ -1412,6 +1416,16 @@ flowchart LR
 
 3 nubes (Proxmox local · GCP-A streaming · GCP-B analítica) unidas por **WireGuard**.
 
+## Alta disponibilidad (HA) — sin punto único de fallo
+
+Tanto el **cómputo** como la **ingesta** toleran la caída de un nodo:
+
+- **Clúster RMI** (cómputo): gossip P2P, sin líder ni coordinador → si cae un nodo, el cliente hace failover al resto.
+- **Clúster NiFi HA** (ingesta): **3 nodos** en la nube local coordinados por un **ensemble ZooKeeper local** (quórum 2 → tolera 1 caída). **Cloudflare balancea** entre los `cloudflared` de cada nodo (sin balanceador interno, que sería un nuevo SPOF). Si cae un NiFi, Cloudflare deja de enrutar a su conector y el resto sigue ingiriendo.
+- **Red de seguridad de datos:** aunque caiga la ingesta, lo ya admitido está protegido por **Kafka + ack manual + dead-letter** (`telemetry.DLT`), semántica *at-least-once*.
+
+> El ZooKeeper del clúster NiFi es **local e independiente** del ZK de GCP-A (que coordina Kafka): así la disponibilidad de la ingesta no depende de otra nube ni de WireGuard.
+
 ## Quién calcula / escribe qué
 
 | Acción | Componente | Nota |
@@ -1426,7 +1440,7 @@ flowchart LR
 
 | Nube | Componentes |
 |---|---|
-| **Local (Proxmox)** | NiFi, MySQL, **HDFS**, Harbor (registry) |
+| **Local (Proxmox)** | **Clúster NiFi HA x3** + **ZooKeeper local x3** + cloudflared, MySQL, **HDFS**, Harbor (registry) |
 | **GCP-A (Streaming)** | Kafka, Schema Registry, Bridge, RMI, **Cassandra**, registry |
 | **GCP-B (Analítica)** | Panel web, Grafana, registry |
 
