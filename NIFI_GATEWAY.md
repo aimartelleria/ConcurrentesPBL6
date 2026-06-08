@@ -23,20 +23,22 @@ Ansible solo despliega el contenedor + cloudflared).
    - Descarta el registro si `activa != 1` (responde 401/403 al colector).
    - El `nombre` devuelto es el `nombre_ordenador` canónico de la BD (NO la cabecera `X-Portatil`,
      que solo sirve de cross-check).
-3. **Enriquece + mapea** el record a los campos que lee el bridge:
-   | Campo Avro | Origen | Transformación en NiFi |
+3. **Enriquece + mapea** el record a los campos que lee el bridge. La columna **Origen**
+   son las **claves JSON** del payload del colector (las `json:` tags de `metrics_shared.go`),
+   NO los nombres del struct Go. Varios campos requieren **renombrar** (ES↔EN), no son copia directa:
+   | Campo Avro | Origen (clave JSON del colector) | Transformación en NiFi |
    |---|---|---|
    | `empresa_id` | MySQL `licencia_lookup` | directo (long) |
    | `nombre` | MySQL `licencia_lookup` (`nombre_ordenador`) | directo |
-   | `ts` | colector `Timestamp` (Unix **segundos**) | **×1000 → milisegundos** |
-   | `cpu_percent` | colector `CPUPercent` | directo |
-   | `ram_percent` | colector `RAMPercent` | directo |
-   | `disco_percent` | colector `DiskPercent` | directo |
-   | `temperatura` | colector `Temp` | directo (nullable) |
-   | `bateria_percent` | colector `BateriaPercent` | directo (nullable) |
-   | `ram` | colector `RAMTotal` (bytes) | **formatear a texto** (p.ej. "16 GB") |
-   | `almacenamiento` | colector `DiskTotal` (bytes) | **formatear a texto** (p.ej. "512 GB") |
-   | `procesador` | colector `CPUModel` | directo (nullable) |
+   | `ts` | `timestamp` (Unix **segundos**) | **×1000 → milisegundos** |
+   | `cpu_percent` | `cpu_percent` | directo |
+   | `ram_percent` | `ram_percent` | directo |
+   | `disco_percent` | `disk_percent` | **renombrar** `disk_percent` → `disco_percent` |
+   | `temperatura` | `temp_c` | **renombrar** `temp_c` → `temperatura` (nullable) |
+   | `bateria_percent` | `bateria_percent` | directo (nullable) |
+   | `ram` | `ram_total` (bytes) | **formatear a texto** (p.ej. "16 GB") |
+   | `almacenamiento` | `disk_total` (bytes) | **formatear a texto** (p.ej. "512 GB") |
+   | `procesador` | `cpu_model` | **renombrar** `cpu_model` → `procesador` (nullable) |
 4. **Serializa a Avro** contra el **Confluent Schema Registry** y publica en **Kafka** (`telemetry`).
 
 > El `stressScore` y la escritura en **Cassandra + HDFS Parquet** ocurren **aguas abajo, en el bridge**
@@ -77,6 +79,23 @@ El job MapReduce lee el Parquet que escribe `HdfsParquetWriter` y agrupa por emp
 En este contrato `ram`/`almacenamiento` son **texto** (p.ej. "16 GB"). El mapper los parsea a GB
 numéricos para construir el tier (`ramGb`/`stoGb`) y escribir los agregados en HBase.
 
-## Despliegue (rol Ansible)
-El rol `ansible/roles/nifi` (repo de infra) levanta el contenedor NiFi (UI 8080, ingesta 8081)
-+ cloudflared (túnel saliente). El **flujo de arriba se importa/monta en la UI** — no está en el rol.
+## Despliegue (rol Ansible) — Clúster NiFi HA
+El rol `ansible/roles/nifi` (repo de infra) despliega un **clúster NiFi de 3 nodos** en la nube
+local (`var.topology.nifi = 3`), con **alta disponibilidad**:
+
+- **Coordinación: ZooKeeper local** (ensemble de 3, co-localizado en los mismos CTs que NiFi).
+  Es independiente del ZK de gcp-a (Kafka) → la ingesta no depende de otra nube. Quórum 2 = tolera 1 caída.
+- **Balanceo: Cloudflare en el edge.** `cloudflared` corre en **cada nodo** con el **mismo token**:
+  Cloudflare reparte las conexiones entre los conectores sanos y cada uno enruta a su NiFi local
+  (`localhost:8081`). **No hay LB interno** (que sería un nuevo SPOF). El `HandleHttpRequest` corre
+  en todos los nodos.
+- **Flujo replicado:** se configura **una sola vez** vía REST API (`files/configure_flow.py`,
+  idempotente, `run_once`) contra el coordinador; NiFi replica el flujo a todos los nodos.
+- **Modo HTTP interno** (sin TLS) en la red local de confianza — evita el problema de confianza
+  mutua de certificados entre nodos. El cifrado de cara al exterior lo pone Cloudflare.
+- Puertos del clúster: `11443` (protocolo entre nodos), `6342` (load-balance de colas),
+  `2181/2888/3888` (ZK local). `NIFI_SENSITIVE_PROPS_KEY` idéntica en todos los nodos (vault).
+
+> **HA real de extremo a extremo:** el clúster RMI (cómputo) y ahora el gateway NiFi (ingesta)
+> son ambos tolerantes a la caída de un nodo. Caída de 1 NiFi → Cloudflare deja de enrutar a su
+> conector y el resto sigue ingiriendo; Kafka + ack manual + DLT protegen los datos ya admitidos.

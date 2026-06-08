@@ -656,6 +656,9 @@
             <li class="menu-item" data-doc="arquitectura">
                 <button><i class="fa-solid fa-diagram-project"></i> Arquitectura</button>
             </li>
+            <li class="menu-item" data-doc="flujo">
+                <button><i class="fa-solid fa-cloud-arrow-up"></i> Flujo por Nube</button>
+            </li>
             <li class="menu-item" data-doc="completa">
                 <button><i class="fa-solid fa-book"></i> Memoria Completa</button>
             </li>
@@ -674,7 +677,7 @@
             <div style="font-size: 12px; color: var(--text-muted);">
                 v2.1.0-RC
             </div>
-            <a href="https://github.com/betxe/WebHardMon" target="_blank" style="color: var(--text-secondary);"><i class="fa-brands fa-github"></i></a>
+            <a href="https://github.com/aimartelleria/ConcurrentesPBL6" target="_blank" style="color: var(--text-secondary);"><i class="fa-brands fa-github"></i></a>
         </div>
     </aside>
 
@@ -1204,9 +1207,9 @@ java -cp "client/target/client-1.0-SNAPSHOT.jar" cluster.Client localhost:6100 l
 ### 3. Ejecutar el Agente Go
 El agente envía las métricas al gateway NiFi (modo *publisher*), incluyendo el código de licencia y el identificador del portátil:
 ```bash
-go run . -mode=publisher -nifi-url=http://localhost:8080/contentListener -codigo=TU_CODIGO_LICENCIA -portatil=PC-01
+go run . -mode=publisher -nifi-url=http://localhost:8081/telemetry -codigo=TU_CODIGO_LICENCIA -portatil=PC-01
 ```
-> Ejecuta el comando desde el directorio `AgenteGo-main/` (donde reside `SubscriberKafka.go`). Ajusta `-nifi-url`, `-codigo` y `-portatil` a tu entorno.
+> El agente Go vive en su **propio repositorio** (no en este). Ejecuta el comando desde el directorio del agente (donde reside `SubscriberKafka.go`). Ajusta `-nifi-url` (puerto **8081**, ruta `/telemetry`), `-codigo` y `-portatil` a tu entorno.
 
 ---
 
@@ -1347,6 +1350,91 @@ Esta prueba distribuye **150 tareas del pipeline de Stress Score (Modelo a Trozo
        java -cp client/target/client-1.0-SNAPSHOT.jar cluster.Benchmark cluster localhost:6100 localhost:6101 localhost:6102
        ```
   4. El programa despacha en paralelo las 150 tareas desde el cliente mediante un pool de hilos virtuales balanceándolas uniformemente en Round-Robin entre los stubs RMI de los nodos encendidos. Mide el tiempo total en milisegundos que toma procesar el lote bajo cada topología de clúster incremental y calcula el rendimiento (tareas/seg).
+    </script>
+
+    <script type="text/markdown" id="doc-flujo">
+# 🔄 Arquitectura — Flujo por Nube
+
+> **Fuente de verdad del contrato de datos = el bridge Java (`client/Client.java`).** NiFi lo
+> maneja nuestro equipo, así que emite el Avro con los nombres que el bridge lee. El `stressScore`
+> **NO** viaja en el payload: lo calcula el clúster RMI y lo añade el bridge.
+
+## Vista de alto nivel
+
+```mermaid
+flowchart LR
+    AG["Agente Go<br/>CPU·RAM·disco·temp·bateria"]
+    subgraph LOCAL["Nube local (Proxmox)"]
+        NIFI["NiFi gateway<br/>valida licencia + empresa_id"]
+        MYSQL[("MySQL<br/>telemetriadb")]
+        HDFS[("HDFS Parquet<br/>/data/telemetry")]
+        REGL["Docker Registry (Harbor)"]
+    end
+    subgraph GCPA["GCP-A — Streaming"]
+        KAFKA["Kafka<br/>topic telemetry"]
+        SR["Schema Registry"]
+        BRIDGE["Bridge<br/>Client.java"]
+        RMI["Cluster RMI 2-3 nodos<br/>StressScore"]
+        CASS[("Cassandra<br/>webhardmon.mediciones")]
+        REGA["Docker Registry"]
+    end
+    subgraph GCPB["GCP-B — Analitica / Servicio"]
+        WEB["Panel web<br/>Spring Boot"]
+        GRAF["Grafana"]
+        REGB["Docker Registry"]
+    end
+    AG -->|"JSON + X-License-Code<br/>Cloudflare Tunnel"| NIFI
+    NIFI -->|"lookup licencia"| MYSQL
+    NIFI -->|"Avro"| KAFKA
+    KAFKA -.-> SR
+    SR -.-> BRIDGE
+    KAFKA -->|"consume Avro"| BRIDGE
+    BRIDGE -->|"StressTask RMI"| RMI
+    RMI -->|"stressScore"| BRIDGE
+    BRIDGE -->|"hot"| CASS
+    BRIDGE -->|"batch Parquet"| HDFS
+    WEB --> MYSQL
+    WEB --> CASS
+    WEB --> GRAF
+```
+
+## Flujo paso a paso
+
+1. **Agente Go** (en cada PC) recoge CPU/RAM/disco/temperatura/**batería** y envía **JSON** a NiFi con cabeceras `X-License-Code` / `X-Portatil`. Entra por **Cloudflare Tunnel** (no por WireGuard).
+2. **NiFi (gateway)** valida la licencia contra **MySQL** (vista `licencia_lookup`) y enriquece `empresa_id` + `nombre`. Serializa a **Avro** (Schema Registry) y publica en Kafka topic `telemetry`. *El payload NO lleva `stressScore`.*
+3. **Bridge (`client/Client.java`)** consume de Kafka (Avro vía SR, Virtual Threads):
+   - llama al **clúster RMI** con `StressTask` (round-robin + failover) → obtiene `stressScore`.
+   - escribe en **Cassandra** `webhardmon.mediciones` (hot path).
+   - escribe **Parquet en HDFS** `/data/telemetry` (batch, best-effort).
+   - **ack manual** + **dead-letter** `telemetry.DLT` → *at-least-once*.
+4. **Clúster RMI** calcula `StressScore = 0.4·CPU + 0.4·RAM + 0.2·Disco (+20 si Tª>80 ºC)`, acotado [0,100].
+5. **Panel web** (Spring Boot, GCP-B) lee MySQL + Cassandra + Grafana.
+
+3 nubes (Proxmox local · GCP-A streaming · GCP-B analítica) unidas por **WireGuard**.
+
+## Quién calcula / escribe qué
+
+| Acción | Componente | Nota |
+|---|---|---|
+| Validar licencia + enriquecer `empresa_id`/`nombre` | **NiFi** | contra MySQL, antes de Kafka |
+| Serializar a Avro y publicar | **NiFi** | topic `telemetry` |
+| Calcular `stressScore` | **Clúster RMI** | disparado por el bridge, **después** de Kafka |
+| Escribir Cassandra (hot) | **Bridge** | tras el RMI |
+| Escribir HDFS Parquet (batch) | **Bridge** | tras el RMI — **NiFi NO escribe Parquet** |
+
+## Distribución por nube
+
+| Nube | Componentes |
+|---|---|
+| **Local (Proxmox)** | NiFi, MySQL, **HDFS**, Harbor (registry) |
+| **GCP-A (Streaming)** | Kafka, Schema Registry, Bridge, RMI, **Cassandra**, registry |
+| **GCP-B (Analítica)** | Panel web, Grafana, registry |
+
+Cada nube tiene su **propio Docker Registry** (Harbor local + uno en GCP-A + otro en GCP-B). Las imágenes se construyen con `docker/build-and-push.sh`: `stressscore`/`stressscore-bridge` → GCP-A, `web` → GCP-B.
+
+## Contrato Avro (gobernado por `client`)
+
+El esquema (`schemas/telemetry.avsc`) emite los nombres que el bridge lee: `empresa_id`, `nombre`, `ts`(ms), `cpu_percent`, `ram_percent`, `disco_percent`, `temperatura?`, `bateria_percent?`, `ram`(texto), `almacenamiento`(texto), `procesador?`. El `stressScore` lo añade el bridge tras el RMI; **no es un campo de ingesta**.
     </script>
 
     <script type="text/markdown" id="doc-arquitectura">
