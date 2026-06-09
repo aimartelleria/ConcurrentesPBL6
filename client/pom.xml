@@ -76,6 +76,17 @@
       <artifactId>parquet-avro</artifactId>
       <version>1.14.0</version>
     </dependency>
+
+    <!-- Implementación de logging (org.apache.log4j.*) para el binding slf4j-reload4j
+         que arrastra hadoop-hdfs-client. Sin ella, el fat-jar lanza al arrancar:
+         NoClassDefFoundError: org/apache/log4j/Level (al construir la CqlSession),
+         y el bridge crashea antes de consumir. reload4j 1.2.x = drop-in de log4j 1.2
+         con los CVE parcheados. -->
+    <dependency>
+      <groupId>ch.qos.reload4j</groupId>
+      <artifactId>reload4j</artifactId>
+      <version>1.2.25</version>
+    </dependency>
   </dependencies>
 
   <build>
