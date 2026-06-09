@@ -71,6 +71,19 @@
         <exclusion><groupId>org.apache.avro</groupId><artifactId>avro</artifactId></exclusion>
       </exclusions>
     </dependency>
+    <!-- parquet-hadoop (vía parquet-avro) usa ParquetOutputFormat, que extiende
+         org.apache.hadoop.mapreduce.lib.output.FileOutputFormat. Esa clase vive en
+         hadoop-mapreduce-client-core; sin ella, la escritura Parquet en HDFS lanza
+         NoClassDefFoundError: .../FileOutputFormat al escribir el primer registro. -->
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-mapreduce-client-core</artifactId>
+      <version>3.3.6</version>
+      <exclusions>
+        <exclusion><groupId>org.apache.avro</groupId><artifactId>avro</artifactId></exclusion>
+        <exclusion><groupId>org.slf4j</groupId><artifactId>slf4j-reload4j</artifactId></exclusion>
+      </exclusions>
+    </dependency>
     <dependency>
       <groupId>org.apache.parquet</groupId>
       <artifactId>parquet-avro</artifactId>

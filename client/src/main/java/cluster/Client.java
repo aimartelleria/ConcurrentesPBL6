@@ -284,8 +284,12 @@ public class Client {
                 hdfs.write(empresaId, nombre, tsMillis, cpu, ram, disco, temp, bateria,
                         ramTxt, almTxt, str(r, "procesador"), stress);
                 hdfsOk = true;
-            } catch (Exception e) {
-                System.err.println("   [HDFS] write falló (Cassandra OK): " + e.getMessage());
+            } catch (Throwable e) {
+                // Throwable (no solo Exception): el path HDFS puede lanzar Error
+                // (p.ej. NoClassDefFoundError de clases Hadoop). Capturándolo aquí,
+                // un fallo de HDFS es de verdad best-effort y NUNCA tumba el lote
+                // ni el hot path a Cassandra.
+                System.err.println("   [HDFS] write falló (Cassandra OK): " + e);
             }
         }
 
