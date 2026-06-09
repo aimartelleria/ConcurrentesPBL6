@@ -198,6 +198,13 @@ public class Client {
                 "VALUES (:empresa_id, :nombre, :ts, :cpu_percent, :ram_percent, :disco_percent, " +
                 ":temperatura, :bateria_percent, :stress_score, :ram, :almacenamiento)");
 
+            // Upsert al inventario de ordenadores (1 fila por equipo, PK ((empresa_id), nombre)).
+            // No incluye codigo_licencia: el Avro de Kafka no lo lleva (NiFi solo enriquece
+            // empresa_id/nombre), así que no se toca esa columna (no la pisa con null).
+            PreparedStatement upsertOrd = session.prepare(
+                "INSERT INTO ordenadores (empresa_id, nombre, procesador, ram, almacenamiento, ultima_vez) " +
+                "VALUES (:empresa_id, :nombre, :procesador, :ram, :almacenamiento, :ultima_vez)");
+
             consumer.subscribe(Collections.singletonList(topic));
             while (true) {
                 ConsumerRecords<String, GenericRecord> records = consumer.poll(Duration.ofMillis(100));
@@ -208,7 +215,7 @@ public class Client {
                 for (ConsumerRecord<String, GenericRecord> record : records) {
                     batch.add(executor.submit(() -> {
                         try {
-                            processRecord(client, session, insert, hdfs, record.value());
+                            processRecord(client, session, insert, upsertOrd, hdfs, record.value());
                             return true;
                         } catch (Exception e) {
                             return sendToDeadLetter(dlqProducer, DLQ_TOPIC, record, e);
@@ -245,7 +252,7 @@ public class Client {
 
     /** Calcula StressScore por RMI y persiste en Cassandra (hot) y, opcional, HDFS (batch). */
     private static void processRecord(Client client, CqlSession session, PreparedStatement insert,
-                                      HdfsParquetWriter hdfs, GenericRecord r) throws Exception {
+                                      PreparedStatement upsertOrd, HdfsParquetWriter hdfs, GenericRecord r) throws Exception {
         if (r == null) throw new IllegalArgumentException("registro Avro nulo");
 
         long   empresaId = num(r, "empresa_id").longValue();
@@ -276,6 +283,22 @@ public class Client {
         if (temp != null)    b = b.setDouble("temperatura", temp);     else b = b.setToNull("temperatura");
         if (bateria != null) b = b.setDouble("bateria_percent", bateria); else b = b.setToNull("bateria_percent");
         session.execute(b.build());
+
+        // 2b. Inventario de ordenadores (best-effort: un fallo aquí NO debe tumbar ni
+        //     reprocesar la métrica, que es el hot path). Upsert idempotente por equipo.
+        try {
+            String procesador = str(r, "procesador");
+            BoundStatementBuilder o = upsertOrd.boundStatementBuilder()
+                    .setLong("empresa_id", empresaId)
+                    .setString("nombre", nombre)
+                    .setInstant("ultima_vez", Instant.ofEpochMilli(tsMillis))
+                    .setString("ram", ramTxt)
+                    .setString("almacenamiento", almTxt);
+            o = (procesador != null) ? o.setString("procesador", procesador) : o.setToNull("procesador");
+            session.execute(o.build());
+        } catch (Throwable e) {
+            System.err.println("   [ordenadores] upsert falló (mediciones OK): " + e);
+        }
 
         // 3. Camino batch: Parquet en HDFS (best-effort; un fallo de HDFS NO afecta a Cassandra).
         boolean hdfsOk = false;
